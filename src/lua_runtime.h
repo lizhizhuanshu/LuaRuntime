@@ -1,0 +1,114 @@
+#pragma once
+
+extern "C" {
+#include "lua.h"
+}
+
+#include <sol/sol.hpp>
+
+#include <asio.hpp>
+
+#include <condition_variable>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <queue>
+#include <string>
+#include <unordered_map>
+#include <variant>
+#include <vector>
+
+#include "code_provider.h"
+#include "lua_extension.h"
+
+using AsyncHandle = int64_t;
+using LuaValue = std::variant<std::nullptr_t, bool, int64_t, double, std::string>;
+
+class LuaRuntimeFactory;
+
+class LuaRuntime : public std::enable_shared_from_this<LuaRuntime> {
+public:
+    using Ptr = std::shared_ptr<LuaRuntime>;
+
+    ~LuaRuntime();
+
+    int RunScript(const std::string& script);
+    int RunFile(const std::string& filename);
+
+    static Ptr FromLuaState(lua_State* L);
+
+    AsyncHandle PreYield(lua_State* L);
+    int Yield(lua_State* L);
+
+    void Resume(AsyncHandle handle);
+    void Resume(AsyncHandle handle, std::vector<LuaValue> args);
+
+    void CallLuaFunction(int fn_ref, std::vector<LuaValue> args = {});
+
+    sol::state& lua() { return *lua_; }
+
+    CodeProvider* code_provider() const { return code_provider_.get(); }
+    asio::io_context* io_context() const { return io_context_; }
+
+    std::optional<lua_CFunction> find_c_module(const std::string& name) const {
+        auto it = c_modules_.find(name);
+        return it != c_modules_.end() ? std::optional(it->second) : std::nullopt;
+    }
+
+private:
+    friend class LuaRuntimeFactory;
+
+    LuaRuntime();
+
+    static void Setup(sol::state& lua, const std::shared_ptr<CodeProvider>& code_provider,
+                    const std::unordered_map<std::string, lua_CFunction>& c_modules,
+                    asio::io_context* io_context,
+                    const std::vector<std::shared_ptr<LuaExtension>>& extensions);
+
+    void CancelTimer(AsyncHandle handle);
+
+    struct PendingEntry {
+        lua_State* co;
+        int registry_ref;
+    };
+
+    struct ResumeRequest {
+        AsyncHandle handle;
+        std::vector<LuaValue> args;
+    };
+
+    struct ResumeResult {
+        lua_State* co = nullptr;
+        int status = 0;
+    };
+
+    enum class TimerType { kSleep, kSetTimeout };
+
+    struct TimerEntry {
+        TimerType type;
+        lua_State* co = nullptr;
+        int fn_ref = LUA_NOREF;
+        AsyncHandle handle = 0;
+    };
+
+    int RunInCoroutine(const std::string& chunk, const std::string& name);
+    ResumeResult DoResume(AsyncHandle handle, std::vector<LuaValue> args);
+    void ProcessExpiredTimers(lua_State* main_co, int& main_status);
+    void MaybeRecycleCallbackCo(lua_State* co, int status);
+    void PushValues(lua_State* L, const std::vector<LuaValue>& values);
+
+    std::unique_ptr<sol::state> lua_;
+    std::shared_ptr<CodeProvider> code_provider_;
+    std::unordered_map<std::string, lua_CFunction> c_modules_;
+    asio::io_context* io_context_ = nullptr;
+    std::vector<std::shared_ptr<LuaExtension>> extensions_;
+    mutable std::mutex mutex_;
+    std::condition_variable cv_;
+    std::queue<ResumeRequest> resume_queue_;
+    std::unordered_map<AsyncHandle, PendingEntry> pending_;
+    std::multimap<int64_t, TimerEntry> timer_queue_;
+    AsyncHandle next_handle_ = 1;
+    std::queue<std::pair<int, std::vector<LuaValue>>> callback_queue_;
+    std::unordered_map<lua_State*, int> active_callback_co_map_;
+};
