@@ -1,6 +1,6 @@
 #pragma once
 
-#include <asio.hpp>
+#include <async_simple/Executor.h>
 
 #include <memory>
 #include <string>
@@ -14,13 +14,13 @@ class LuaRuntimeFactory {
 public:
     LuaRuntimeFactory& Register(const std::string& name, lua_CFunction openf);
     LuaRuntimeFactory& WithCodeProvider(std::shared_ptr<CodeProvider> provider);
-    LuaRuntimeFactory& WithIoContext(asio::io_context& ctx);
+    LuaRuntimeFactory& WithExecutor(async_simple::Executor& executor);
     LuaRuntimeFactory& RegisterExtension(std::shared_ptr<LuaExtension> extension);
     LuaRuntime::Ptr Create();
 
 private:
     std::unordered_map<std::string, lua_CFunction> c_modules_;
     std::shared_ptr<CodeProvider> code_provider_;
-    asio::io_context* io_context_ = nullptr;
+    async_simple::Executor* executor_ = nullptr;
     std::vector<std::shared_ptr<LuaExtension>> extensions_;
 };

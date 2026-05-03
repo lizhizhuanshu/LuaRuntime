@@ -6,7 +6,7 @@ extern "C" {
 
 #include <sol/sol.hpp>
 
-#include <asio.hpp>
+#include <async_simple/Executor.h>
 
 #include <condition_variable>
 #include <map>
@@ -49,7 +49,7 @@ public:
     sol::state& lua() { return *lua_; }
 
     CodeProvider* code_provider() const { return code_provider_.get(); }
-    asio::io_context* io_context() const { return io_context_; }
+    async_simple::Executor* executor() const { return executor_; }
 
     std::optional<lua_CFunction> find_c_module(const std::string& name) const {
         auto it = c_modules_.find(name);
@@ -63,7 +63,7 @@ private:
 
     static void Setup(sol::state& lua, const std::shared_ptr<CodeProvider>& code_provider,
                     const std::unordered_map<std::string, lua_CFunction>& c_modules,
-                    asio::io_context* io_context,
+                    async_simple::Executor* executor,
                     const std::vector<std::shared_ptr<LuaExtension>>& extensions);
 
     void CancelTimer(AsyncHandle handle);
@@ -101,7 +101,7 @@ private:
     std::unique_ptr<sol::state> lua_;
     std::shared_ptr<CodeProvider> code_provider_;
     std::unordered_map<std::string, lua_CFunction> c_modules_;
-    asio::io_context* io_context_ = nullptr;
+    async_simple::Executor* executor_ = nullptr;
     std::vector<std::shared_ptr<LuaExtension>> extensions_;
     mutable std::mutex mutex_;
     std::condition_variable cv_;

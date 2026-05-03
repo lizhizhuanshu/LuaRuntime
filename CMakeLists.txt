@@ -6,19 +6,21 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 include(FetchContent)
+set(FETCHCONTENT_BASE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/.deps)
 
 # ── Dependencies ────────────────────────────────────────────────────────────
 
-# Asio (header-only)
+# async_simple (coroutine + executor)
+set(ASYNC_SIMPLE_ENABLE_TESTS OFF CACHE BOOL "" FORCE)
+set(ASYNC_SIMPLE_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(ASYNC_SIMPLE_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(ASYNC_SIMPLE_ENABLE_BENCHMARKS OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(
-    asio
-    GIT_REPOSITORY https://github.com/chriskohlhoff/asio.git
-    GIT_TAG        asio-1-38-0
+    async_simple
+    GIT_REPOSITORY https://github.com/alibaba/async_simple.git
+    GIT_TAG        main
 )
-FetchContent_MakeAvailable(asio)
-add_library(asio_iface INTERFACE)
-target_include_directories(asio_iface INTERFACE ${asio_SOURCE_DIR}/asio/include)
-target_compile_definitions(asio_iface INTERFACE ASIO_STANDALONE ASIO_NO_DEPRECATED)
+FetchContent_MakeAvailable(async_simple)
 
 # Lua (static library from source)
 FetchContent_Declare(
@@ -65,7 +67,7 @@ target_link_libraries(lua_runtime_lib PUBLIC
     sol2::sol2
     spdlog::spdlog_header_only
     lua
-    asio_iface
+    async_simple
 )
 
 # ── Tests ──────────────────────────────────────────────────────────────────

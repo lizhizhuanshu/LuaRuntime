@@ -10,8 +10,8 @@ LuaRuntimeFactory& LuaRuntimeFactory::WithCodeProvider(std::shared_ptr<CodeProvi
     return *this;
 }
 
-LuaRuntimeFactory& LuaRuntimeFactory::WithIoContext(asio::io_context& ctx) {
-    io_context_ = &ctx;
+LuaRuntimeFactory& LuaRuntimeFactory::WithExecutor(async_simple::Executor& executor) {
+    executor_ = &executor;
     return *this;
 }
 
@@ -22,6 +22,6 @@ LuaRuntimeFactory& LuaRuntimeFactory::RegisterExtension(std::shared_ptr<LuaExten
 
 LuaRuntime::Ptr LuaRuntimeFactory::Create() {
     auto rt = std::shared_ptr<LuaRuntime>(new LuaRuntime());
-    LuaRuntime::Setup(rt->lua(), code_provider_, c_modules_, io_context_, extensions_);
+    LuaRuntime::Setup(rt->lua(), code_provider_, c_modules_, executor_, extensions_);
     return rt;
 }

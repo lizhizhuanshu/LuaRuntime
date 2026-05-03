@@ -134,27 +134,25 @@ int custom_require(lua_State* L) {
         return 1;
     }
 
-    // 3. CodeProvider (async via asio + yieldk)
+    // 3. CodeProvider (async via async_simple + yieldk)
     if (rt->code_provider()) {
-        if (!rt->io_context()) {
-            return luaL_error(L, "module '%s': io_context required for CodeProvider", name);
+        if (!rt->executor()) {
+            return luaL_error(L, "module '%s': executor required for CodeProvider", name);
         }
 
         auto rt_shared = rt->shared_from_this();
         auto handle = rt->PreYield(L);
-        auto* exec = rt->io_context();
+        auto* exec = rt->executor();
         std::string module_name(name);  // safe capture for coroutine
 
-        asio::co_spawn(*exec,
-            [rt_shared, handle, module_name = std::move(module_name)]() mutable -> asio::awaitable<void> {
-                auto source = co_await rt_shared->code_provider()->LoadModule(module_name);
-                if (source.has_value()) {
-                    rt_shared->Resume(handle, {std::move(*source)});
-                } else {
-                    rt_shared->Resume(handle, {LuaValue{nullptr}});
-                }
-            },
-            asio::detached);
+        [rt_shared, handle, exec, module_name = std::move(module_name)]() mutable -> async_simple::coro::Lazy<void> {
+            auto source = co_await rt_shared->code_provider()->LoadModule(module_name);
+            if (source.has_value()) {
+                rt_shared->Resume(handle, {std::move(*source)});
+            } else {
+                rt_shared->Resume(handle, {LuaValue{nullptr}});
+            }
+        }().via(exec).detach();
 
         return lua_yieldk(L, 0, 0, require_continuation);
     }
@@ -189,27 +187,25 @@ int custom_loadfile(lua_State* L) {
         lua_pushfstring(L, "cannot load relative file '%s': no CodeProvider", filename);
         return 2;
     }
-    if (!rt->io_context()) {
+    if (!rt->executor()) {
         lua_pushnil(L);
-        lua_pushfstring(L, "cannot load relative file '%s': no io_context", filename);
+        lua_pushfstring(L, "cannot load relative file '%s': no executor", filename);
         return 2;
     }
 
     auto rt_shared = rt->shared_from_this();
     auto handle = rt->PreYield(L);
-    auto* exec = rt->io_context();
+    auto* exec = rt->executor();
     std::string file_path(filename);  // safe capture for coroutine
 
-    asio::co_spawn(*exec,
-        [rt_shared, handle, file_path = std::move(file_path)]() mutable -> asio::awaitable<void> {
-            auto source = co_await rt_shared->code_provider()->LoadFile(file_path);
-            if (source.has_value()) {
-                rt_shared->Resume(handle, {std::move(*source)});
-            } else {
-                rt_shared->Resume(handle, {LuaValue{nullptr}});
-            }
-        },
-        asio::detached);
+    [rt_shared, handle, exec, file_path = std::move(file_path)]() mutable -> async_simple::coro::Lazy<void> {
+        auto source = co_await rt_shared->code_provider()->LoadFile(file_path);
+        if (source.has_value()) {
+            rt_shared->Resume(handle, {std::move(*source)});
+        } else {
+            rt_shared->Resume(handle, {LuaValue{nullptr}});
+        }
+    }().via(exec).detach();
 
     return lua_yieldk(L, 0, 0, loadfile_continuation);
 }
@@ -223,7 +219,7 @@ LuaRuntime::LuaRuntime() : lua_(std::make_unique<sol::state>()) {
 
 void LuaRuntime::Setup(sol::state& lua, const std::shared_ptr<CodeProvider>& code_provider,
                        const std::unordered_map<std::string, lua_CFunction>& c_modules,
-                       asio::io_context* io_context,
+                       async_simple::Executor* executor,
                        const std::vector<std::shared_ptr<LuaExtension>>& extensions) {
     // Built-in functions
     lua.set_function("now", []() { return NowMs(); });
@@ -268,7 +264,7 @@ void LuaRuntime::Setup(sol::state& lua, const std::shared_ptr<CodeProvider>& cod
     // Config
     auto* rt = GetExtraspace(lua.lua_state());
     rt->code_provider_ = code_provider;
-    rt->io_context_ = io_context;
+    rt->executor_ = executor;
     rt->c_modules_ = c_modules;
     rt->extensions_ = extensions;
 

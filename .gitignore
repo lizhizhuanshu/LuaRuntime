@@ -1,4 +1,4 @@
 build
-_deps
+.deps
 .claude
 .cache

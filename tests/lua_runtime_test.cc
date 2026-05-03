@@ -4,19 +4,20 @@
 
 #include <gtest/gtest.h>
 
-#include <asio.hpp>
+#include <async_simple/coro/Lazy.h>
+#include <async_simple/executors/SimpleExecutor.h>
 #include <map>
 #include <thread>
 
-// --- Test CodeProvider (async via asio) ---
+// --- Test CodeProvider (async via async_simple) ---
 
 class TestCodeProvider : public CodeProvider {
 public:
-    asio::awaitable<std::optional<std::string>> LoadModule(const std::string& name) override {
+    async_simple::coro::Lazy<std::optional<std::string>> LoadModule(const std::string& name) override {
         auto it = modules_.find(name);
         co_return it != modules_.end() ? std::optional(it->second) : std::nullopt;
     }
-    asio::awaitable<std::optional<std::string>> LoadFile(const std::string& path) override {
+    async_simple::coro::Lazy<std::optional<std::string>> LoadFile(const std::string& path) override {
         auto it = files_.find(path);
         co_return it != files_.end() ? std::optional(it->second) : std::nullopt;
     }
@@ -320,19 +321,11 @@ protected:
         auto p = std::make_unique<TestCodeProvider>();
         provider = p.get();
         rt = LuaRuntimeFactory()
-            .WithIoContext(io)
+            .WithExecutor(executor)
             .WithCodeProvider(std::move(p))
             .Create();
-        io_thread = std::thread([this]() { io.run(); });
     }
-    void TearDown() override {
-        io.stop();
-        if (io_thread.joinable()) io_thread.join();
-        io.restart();
-    }
-    asio::io_context io;
-    asio::executor_work_guard<asio::io_context::executor_type> work{io.get_executor()};
-    std::thread io_thread;
+    async_simple::executors::SimpleExecutor executor{1};
     TestCodeProvider* provider = nullptr;
     LuaRuntime::Ptr rt;
 };
@@ -438,7 +431,7 @@ protected:
         provider->set_module("util", "return { answer = 42 }");
         provider->set_module("helper", "return { greet = function() return 'hello' end }");
         rt = LuaRuntimeFactory()
-            .WithIoContext(io)
+            .WithExecutor(executor)
             .Register("util", [](lua_State* L) -> int {
                 lua_newtable(L);
                 lua_pushstring(L, "from_c");
@@ -447,16 +440,8 @@ protected:
             })
             .WithCodeProvider(std::move(provider))
             .Create();
-        io_thread = std::thread([this]() { io.run(); });
     }
-    void TearDown() override {
-        io.stop();
-        if (io_thread.joinable()) io_thread.join();
-        io.restart();
-    }
-    asio::io_context io;
-    asio::executor_work_guard<asio::io_context::executor_type> work{io.get_executor()};
-    std::thread io_thread;
+    async_simple::executors::SimpleExecutor executor{1};
     LuaRuntime::Ptr rt;
 };
 
@@ -551,21 +536,12 @@ protected:
         provider->set_module("greet", "return { hello = function() return 'hi' end }");
 
         factory = std::make_unique<LuaRuntimeFactory>();
-        factory->WithIoContext(io);
+        factory->WithExecutor(executor);
         factory->WithCodeProvider(std::move(p));
         factory->Register("testmath", luaopen_testmath);
-
-        io_thread = std::thread([this]() { io.run(); });
-    }
-    void TearDown() override {
-        io.stop();
-        if (io_thread.joinable()) io_thread.join();
-        io.restart();
     }
 
-    asio::io_context io;
-    asio::executor_work_guard<asio::io_context::executor_type> work{io.get_executor()};
-    std::thread io_thread;
+    async_simple::executors::SimpleExecutor executor{1};
     TestCodeProvider* provider = nullptr;
     std::unique_ptr<LuaRuntimeFactory> factory;
 };
