@@ -1,9 +1,5 @@
 cmake_minimum_required(VERSION 3.26)
 
-# Force gcc/g++ to avoid c89-gcc on this system.
-set(CMAKE_C_COMPILER /usr/bin/gcc CACHE FILEPATH "" FORCE)
-set(CMAKE_CXX_COMPILER /usr/bin/g++ CACHE FILEPATH "" FORCE)
-
 project(lua_runtime LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 20)
@@ -45,7 +41,7 @@ set(SOL2_INSTALL OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(
     sol2
     GIT_REPOSITORY https://github.com/lizhizhuanshu/sol2.git
-    GIT_TAG        c1f95a773c6f8f4fde8ca3efe872e7286afe4444
+    GIT_TAG        v3.5.0
 )
 FetchContent_MakeAvailable(sol2)
 
