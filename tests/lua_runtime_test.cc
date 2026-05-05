@@ -48,25 +48,59 @@ protected:
 // --- RunScript ---
 
 TEST_F(LuaRuntimeTest, RunScriptReturnsOkOnSuccess) {
-    EXPECT_EQ(AWAIT(rt->RunScript("print('hello')")), LUA_OK);
+    EXPECT_EQ(AWAIT(rt->RunScript("print('hello')")).status, LUA_OK);
 }
 
 TEST_F(LuaRuntimeTest, RunScriptReturnsErrorOnSyntaxError) {
-    EXPECT_NE(AWAIT(rt->RunScript("if true")), LUA_OK);
+    auto r = AWAIT(rt->RunScript("if true"));
+    EXPECT_NE(r.status, LUA_OK);
+    EXPECT_FALSE(r.error.empty());
 }
 
 TEST_F(LuaRuntimeTest, RunScriptReturnsErrorOnRuntimeError) {
-    EXPECT_NE(AWAIT(rt->RunScript("error('boom')")), LUA_OK);
+    auto r = AWAIT(rt->RunScript("error('boom')"));
+    EXPECT_NE(r.status, LUA_OK);
+    EXPECT_NE(r.error.find("boom"), std::string::npos);
 }
 
 TEST_F(LuaRuntimeTest, RunScriptCanReadGlobalSetFromC) {
     rt->lua()["x"] = 42;
-    EXPECT_EQ(AWAIT(rt->RunScript("assert(x == 42)")), LUA_OK);
+    EXPECT_EQ(AWAIT(rt->RunScript("assert(x == 42)")).status, LUA_OK);
 }
 
 TEST_F(LuaRuntimeTest, RunScriptCanCallCFunction) {
     rt->lua().set_function("double_it", [](int v) { return v * 2; });
-    EXPECT_EQ(AWAIT(rt->RunScript("assert(double_it(5) == 10)")), LUA_OK);
+    EXPECT_EQ(AWAIT(rt->RunScript("assert(double_it(5) == 10)")).status, LUA_OK);
+}
+
+TEST_F(LuaRuntimeTest, RunScriptReturnsValues) {
+    auto r = AWAIT(rt->RunScript("return 42, 'hello', 3.14"));
+    EXPECT_EQ(r.status, LUA_OK);
+    ASSERT_EQ(r.values.size(), 3u);
+    EXPECT_EQ(std::get<int64_t>(r.values[0]), 42);
+    EXPECT_EQ(std::get<std::string>(r.values[1]), "hello");
+    EXPECT_DOUBLE_EQ(std::get<double>(r.values[2]), 3.14);
+}
+
+TEST_F(LuaRuntimeTest, RunScriptReturnsNilValue) {
+    auto r = AWAIT(rt->RunScript("return nil"));
+    EXPECT_EQ(r.status, LUA_OK);
+    ASSERT_EQ(r.values.size(), 1u);
+    EXPECT_TRUE(std::holds_alternative<std::nullptr_t>(r.values[0]));
+}
+
+TEST_F(LuaRuntimeTest, RunScriptReturnsBoolValue) {
+    auto r = AWAIT(rt->RunScript("return true, false"));
+    EXPECT_EQ(r.status, LUA_OK);
+    ASSERT_EQ(r.values.size(), 2u);
+    EXPECT_TRUE(std::get<bool>(r.values[0]));
+    EXPECT_FALSE(std::get<bool>(r.values[1]));
+}
+
+TEST_F(LuaRuntimeTest, RunScriptReturnsNoValues) {
+    auto r = AWAIT(rt->RunScript("local x = 1"));
+    EXPECT_EQ(r.status, LUA_OK);
+    EXPECT_TRUE(r.values.empty());
 }
 
 // --- FromLuaState ---
@@ -76,7 +110,7 @@ TEST_F(LuaRuntimeTest, FromLuaStateReturnsCorrectRuntime) {
         auto ptr = LuaRuntime::FromLuaState(s);
         return ptr.get() == rt.get() ? 1 : 0;
     };
-    EXPECT_EQ(AWAIT(rt->RunScript("assert(get_rt() == 1)")), LUA_OK);
+    EXPECT_EQ(AWAIT(rt->RunScript("assert(get_rt() == 1)")).status, LUA_OK);
 }
 
 // --- Async yield/resume: single ---
@@ -88,7 +122,7 @@ TEST_F(LuaRuntimeTest, AsyncNoArgs) {
         std::thread([rt, handle]() { rt->Resume(handle); }).detach();
         return rt->Yield(L);
     });
-    EXPECT_EQ(AWAIT(rt->RunScript("async_noop()")), LUA_OK);
+    EXPECT_EQ(AWAIT(rt->RunScript("async_noop()")).status, LUA_OK);
 }
 
 TEST_F(LuaRuntimeTest, AsyncReturnsIntValue) {
@@ -103,7 +137,7 @@ TEST_F(LuaRuntimeTest, AsyncReturnsIntValue) {
     EXPECT_EQ(AWAIT(rt->RunScript(R"(
         local v = async_value()
         assert(v == 99, "expected 99 got " .. tostring(v))
-    )")), LUA_OK);
+    )")).status, LUA_OK);
 }
 
 TEST_F(LuaRuntimeTest, AsyncReturnsDoubleValue) {
@@ -118,7 +152,7 @@ TEST_F(LuaRuntimeTest, AsyncReturnsDoubleValue) {
     EXPECT_EQ(AWAIT(rt->RunScript(R"(
         local v = async_double()
         assert(math.abs(v - 3.14) < 0.001)
-    )")), LUA_OK);
+    )")).status, LUA_OK);
 }
 
 TEST_F(LuaRuntimeTest, AsyncReturnsBoolValue) {
@@ -133,7 +167,7 @@ TEST_F(LuaRuntimeTest, AsyncReturnsBoolValue) {
     EXPECT_EQ(AWAIT(rt->RunScript(R"(
         local v = async_bool()
         assert(v == true)
-    )")), LUA_OK);
+    )")).status, LUA_OK);
 }
 
 TEST_F(LuaRuntimeTest, AsyncReturnsStringValue) {
@@ -148,7 +182,7 @@ TEST_F(LuaRuntimeTest, AsyncReturnsStringValue) {
     EXPECT_EQ(AWAIT(rt->RunScript(R"(
         local v = async_str()
         assert(v == "hello from C++")
-    )")), LUA_OK);
+    )")).status, LUA_OK);
 }
 
 TEST_F(LuaRuntimeTest, AsyncReturnsNilValue) {
@@ -160,7 +194,7 @@ TEST_F(LuaRuntimeTest, AsyncReturnsNilValue) {
         }).detach();
         return rt->Yield(L);
     });
-    EXPECT_EQ(AWAIT(rt->RunScript("local v = async_nil(); assert(v == nil)")), LUA_OK);
+    EXPECT_EQ(AWAIT(rt->RunScript("local v = async_nil(); assert(v == nil)")).status, LUA_OK);
 }
 
 // --- Multiple sequential async calls in one script ---
@@ -182,7 +216,7 @@ TEST_F(LuaRuntimeTest, SequentialAsyncCalls) {
         local b = async_add(a, 3)
         local c = async_add(b, 4)
         assert(c == 10, "expected 10 got " .. tostring(c))
-    )")), LUA_OK);
+    )")).status, LUA_OK);
 }
 
 // --- Concurrent async calls on separate LuaRuntime instances ---
@@ -210,14 +244,14 @@ TEST_F(LuaRuntimeTest, ConcurrentRuntimes) {
         r1 = AWAIT(rt1->RunScript(R"(
             local v = async_id(1)
             assert(v == 1)
-        )"));
+        )")).status;
     });
 
     std::thread t2([&r2, rt2]() {
         r2 = AWAIT(rt2->RunScript(R"(
             local v = async_id(2)
             assert(v == 2)
-        )"));
+        )")).status;
     });
 
     t1.join();
@@ -237,7 +271,7 @@ TEST_F(LuaRuntimeTest, NowReturnsMilliseconds) {
         -- sleep 50ms and check that time advanced
         sleep(50)
         assert(now() - t >= 50, "elapsed too short: " .. tostring(now() - t))
-    )")), LUA_OK);
+    )")).status, LUA_OK);
 }
 
 TEST_F(LuaRuntimeTest, SleepBlocksForDuration) {
@@ -246,7 +280,7 @@ TEST_F(LuaRuntimeTest, SleepBlocksForDuration) {
         sleep(100)
         local elapsed = now() - t
         assert(elapsed >= 80, "slept too short: " .. tostring(elapsed) .. "ms")
-    )")), LUA_OK);
+    )")).status, LUA_OK);
 }
 
 TEST_F(LuaRuntimeTest, SetTimeoutCallsCallback) {
@@ -258,7 +292,7 @@ TEST_F(LuaRuntimeTest, SetTimeoutCallsCallback) {
         end)
         sleep(150)
         assert(done, "callback not called after timeout")
-    )")), LUA_OK);
+    )")).status, LUA_OK);
 }
 
 TEST_F(LuaRuntimeTest, SetTimeoutWithMultipleCallbacks) {
@@ -271,7 +305,7 @@ TEST_F(LuaRuntimeTest, SetTimeoutWithMultipleCallbacks) {
         assert(order[1] == "c", "expected c first, got " .. tostring(order[1]))
         assert(order[2] == "b", "expected b second, got " .. tostring(order[2]))
         assert(order[3] == "a", "expected a third, got " .. tostring(order[3]))
-    )")), LUA_OK);
+    )")).status, LUA_OK);
 }
 
 TEST_F(LuaRuntimeTest, SetTimeoutReturnsHandle) {
@@ -279,7 +313,7 @@ TEST_F(LuaRuntimeTest, SetTimeoutReturnsHandle) {
         local t = setTimeout(100, function() end)
         assert(type(t) == "number", "expected number handle, got " .. type(t))
         assert(t > 0, "expected positive handle")
-    )")), LUA_OK);
+    )")).status, LUA_OK);
 }
 
 TEST_F(LuaRuntimeTest, ClearTimeoutPreventsCallback) {
@@ -289,7 +323,7 @@ TEST_F(LuaRuntimeTest, ClearTimeoutPreventsCallback) {
         clearTimeout(t)
         sleep(100)
         assert(done == false, "callback should not fire after clearTimeout")
-    )")), LUA_OK);
+    )")).status, LUA_OK);
 }
 
 TEST_F(LuaRuntimeTest, ClearTimeoutWithMultipleTimers) {
@@ -303,7 +337,7 @@ TEST_F(LuaRuntimeTest, ClearTimeoutWithMultipleTimers) {
         assert(#results == 2, "expected 2 callbacks, got " .. tostring(#results))
         assert(results[1] == "c", "expected c first")
         assert(results[2] == "b", "expected b second")
-    )")), LUA_OK);
+    )")).status, LUA_OK);
 }
 
 TEST_F(LuaRuntimeTest, ClearTimeoutOnFiredTimerIsHarmless) {
@@ -313,7 +347,7 @@ TEST_F(LuaRuntimeTest, ClearTimeoutOnFiredTimerIsHarmless) {
         sleep(100)
         assert(done == true, "callback should have fired")
         clearTimeout(t)  -- no-op, should not crash
-    )")), LUA_OK);
+    )")).status, LUA_OK);
 }
 
 // --- Custom require and loadfile ---
@@ -339,13 +373,15 @@ TEST_F(LuaRuntimeWithProviderTest, RequireLuaModuleViaCodeProvider) {
     EXPECT_EQ(AWAIT(rt->RunScript(R"(
         local greet = require("greet")
         assert(greet.hello() == "hi")
-    )")), LUA_OK);
+    )")).status, LUA_OK);
 }
 
 TEST_F(LuaRuntimeWithProviderTest, RequireModuleNotFound) {
-    EXPECT_NE(AWAIT(rt->RunScript(R"(
+    auto r = AWAIT(rt->RunScript(R"(
         require("nonexistent_module")
-    )")), LUA_OK);
+    )"));
+    EXPECT_NE(r.status, LUA_OK);
+    EXPECT_FALSE(r.error.empty());
 }
 
 TEST_F(LuaRuntimeWithProviderTest, RequireCaching) {
@@ -359,7 +395,7 @@ TEST_F(LuaRuntimeWithProviderTest, RequireCaching) {
         local b = require("counter")
         assert(a.count == 1, "expected 1 got " .. tostring(a.count))
         assert(a == b, "expected same table on second require")
-    )")), LUA_OK);
+    )")).status, LUA_OK);
 }
 
 TEST_F(LuaRuntimeWithProviderTest, LoadfileRelativePath) {
@@ -370,7 +406,7 @@ TEST_F(LuaRuntimeWithProviderTest, LoadfileRelativePath) {
         assert(type(fn) == "function")
         local result = fn()
         assert(result == 43)
-    )")), LUA_OK);
+    )")).status, LUA_OK);
 }
 
 TEST_F(LuaRuntimeWithProviderTest, LoadfileRelativeNotFound) {
@@ -378,7 +414,7 @@ TEST_F(LuaRuntimeWithProviderTest, LoadfileRelativeNotFound) {
         local fn, err = loadfile("missing.lua")
         assert(fn == nil, "expected nil, got " .. tostring(fn))
         assert(err ~= nil, "expected error message")
-    )")), LUA_OK);
+    )")).status, LUA_OK);
 }
 
 TEST_F(LuaRuntimeWithProviderTest, LoadfileAbsolutePath) {
@@ -386,7 +422,7 @@ TEST_F(LuaRuntimeWithProviderTest, LoadfileAbsolutePath) {
         local fn, err = loadfile("/nonexistent/path.lua")
         assert(fn == nil, "expected nil for nonexistent file")
         assert(err ~= nil, "expected error message")
-    )")), LUA_OK);
+    )")).status, LUA_OK);
 }
 
 class LuaRuntimeRegisterTest : public ::testing::Test {
@@ -416,7 +452,7 @@ TEST_F(LuaRuntimeRegisterTest, RequireCModule) {
     EXPECT_EQ(AWAIT(rt->RunScript(R"(
         local m = require("testmath")
         assert(m.mul(3, 4) == 12)
-    )")), LUA_OK);
+    )")).status, LUA_OK);
 }
 
 TEST_F(LuaRuntimeRegisterTest, RequireCModuleCached) {
@@ -424,7 +460,7 @@ TEST_F(LuaRuntimeRegisterTest, RequireCModuleCached) {
         local a = require("testmath")
         local b = require("testmath")
         assert(a == b, "expected same table")
-    )")), LUA_OK);
+    )")).status, LUA_OK);
 }
 
 class LuaRuntimeFluentBuilderTest : public ::testing::Test {
@@ -454,7 +490,7 @@ TEST_F(LuaRuntimeFluentBuilderTest, FluentChainingWorks) {
         assert(u.source == "from_c", "expected C module via preload")
         local h = require("helper")
         assert(h.greet() == "hello", "expected Lua module via CodeProvider")
-    )")), LUA_OK);
+    )")).status, LUA_OK);
 }
 
 // --- C++ side CallLuaFunction ---
@@ -484,7 +520,7 @@ TEST_F(LuaRuntimeTest, CallLuaFunctionFromCpp) {
         end)
         while not done do sleep(10) end
         assert(done)
-    )")), LUA_OK);
+    )")).status, LUA_OK);
 }
 
 TEST_F(LuaRuntimeTest, CallLuaFunctionWithArgs) {
@@ -514,7 +550,7 @@ TEST_F(LuaRuntimeTest, CallLuaFunctionWithArgs) {
         while got_a == nil do sleep(10) end
         assert(got_a == 42, "expected 42 got " .. tostring(got_a))
         assert(got_b == "hello", "expected hello got " .. tostring(got_b))
-    )")), LUA_OK);
+    )")).status, LUA_OK);
 }
 
 // --- Factory: shared config across multiple runtimes ---
@@ -553,16 +589,16 @@ TEST_F(LuaRuntimeFactoryTest, MultipleRuntimesShareCodeProvider) {
     auto rt1 = factory->Create();
     auto rt2 = factory->Create();
 
-    EXPECT_EQ(AWAIT(rt1->RunScript("local g = require('greet'); assert(g.hello() == 'hi')")), LUA_OK);
-    EXPECT_EQ(AWAIT(rt2->RunScript("local g = require('greet'); assert(g.hello() == 'hi')")), LUA_OK);
+    EXPECT_EQ(AWAIT(rt1->RunScript("local g = require('greet'); assert(g.hello() == 'hi')")).status, LUA_OK);
+    EXPECT_EQ(AWAIT(rt2->RunScript("local g = require('greet'); assert(g.hello() == 'hi')")).status, LUA_OK);
 }
 
 TEST_F(LuaRuntimeFactoryTest, MultipleRuntimesShareCModules) {
     auto rt1 = factory->Create();
     auto rt2 = factory->Create();
 
-    EXPECT_EQ(AWAIT(rt1->RunScript("local m = require('testmath'); assert(m.mul(3, 4) == 12)")), LUA_OK);
-    EXPECT_EQ(AWAIT(rt2->RunScript("local m = require('testmath'); assert(m.mul(5, 6) == 30)")), LUA_OK);
+    EXPECT_EQ(AWAIT(rt1->RunScript("local m = require('testmath'); assert(m.mul(3, 4) == 12)")).status, LUA_OK);
+    EXPECT_EQ(AWAIT(rt2->RunScript("local m = require('testmath'); assert(m.mul(5, 6) == 30)")).status, LUA_OK);
 }
 
 TEST_F(LuaRuntimeFactoryTest, MultipleRuntimesAreIndependent) {
@@ -572,8 +608,8 @@ TEST_F(LuaRuntimeFactoryTest, MultipleRuntimesAreIndependent) {
     rt1->lua()["x"] = 100;
     rt2->lua()["x"] = 200;
 
-    EXPECT_EQ(AWAIT(rt1->RunScript("assert(x == 100)")), LUA_OK);
-    EXPECT_EQ(AWAIT(rt2->RunScript("assert(x == 200)")), LUA_OK);
+    EXPECT_EQ(AWAIT(rt1->RunScript("assert(x == 100)")).status, LUA_OK);
+    EXPECT_EQ(AWAIT(rt2->RunScript("assert(x == 200)")).status, LUA_OK);
 }
 
 // --- LuaExtension ---
@@ -597,7 +633,7 @@ TEST_F(LuaRuntimeFactoryTest, ExtensionOnInitCalled) {
 
     auto rt = factory->Create();
     EXPECT_EQ(ext->init_count, 1);
-    EXPECT_EQ(AWAIT(rt->RunScript("assert(magic_number == 42)")), LUA_OK);
+    EXPECT_EQ(AWAIT(rt->RunScript("assert(magic_number == 42)")).status, LUA_OK);
 }
 
 TEST_F(LuaRuntimeFactoryTest, ExtensionOnShutdownCalled) {
@@ -620,6 +656,6 @@ TEST_F(LuaRuntimeFactoryTest, ExtensionSharedAcrossRuntimes) {
     auto rt2 = factory->Create();
     EXPECT_EQ(ext->init_count, 2);
 
-    EXPECT_EQ(AWAIT(rt1->RunScript("assert(magic_number == 42)")), LUA_OK);
-    EXPECT_EQ(AWAIT(rt2->RunScript("assert(magic_number == 42)")), LUA_OK);
+    EXPECT_EQ(AWAIT(rt1->RunScript("assert(magic_number == 42)")).status, LUA_OK);
+    EXPECT_EQ(AWAIT(rt2->RunScript("assert(magic_number == 42)")).status, LUA_OK);
 }

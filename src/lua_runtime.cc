@@ -322,11 +322,11 @@ LuaRuntime::~LuaRuntime() {
         callback_queue_.pop();
     }
     while (!script_queue_.empty()) {
-        script_queue_.front().promise.setValue(LUA_ERRRUN);
+        script_queue_.front().promise.setValue(ScriptResult{LUA_ERRRUN, {}, "runtime shutdown"});
         script_queue_.pop();
     }
     for (auto& [co, promise] : script_promises_) {
-        promise.setValue(LUA_ERRRUN);
+        promise.setValue(ScriptResult{LUA_ERRRUN, {}, "runtime shutdown"});
     }
     for (auto& [co, ref] : active_co_refs_) {
         luaL_unref(main_L, LUA_REGISTRYINDEX, ref);
@@ -345,8 +345,8 @@ LuaRuntime::Ptr LuaRuntime::FromLuaState(lua_State* L) {
     return rt->shared_from_this();
 }
 
-async_simple::coro::Lazy<int> LuaRuntime::RunScript(const std::string& script) {
-    async_simple::Promise<int> promise;
+async_simple::coro::Lazy<ScriptResult> LuaRuntime::RunScript(const std::string& script) {
+    async_simple::Promise<ScriptResult> promise;
     auto future = promise.getFuture();
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -356,8 +356,8 @@ async_simple::coro::Lazy<int> LuaRuntime::RunScript(const std::string& script) {
     co_return co_await std::move(future);
 }
 
-async_simple::coro::Lazy<int> LuaRuntime::RunFile(const std::string& filename) {
-    async_simple::Promise<int> promise;
+async_simple::coro::Lazy<ScriptResult> LuaRuntime::RunFile(const std::string& filename) {
+    async_simple::Promise<ScriptResult> promise;
     auto future = promise.getFuture();
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -407,17 +407,26 @@ void LuaRuntime::ReleaseCo(lua_State* co) {
     }
 }
 
-void LuaRuntime::MaybeRecycleCo(lua_State* co, int status) {
+void LuaRuntime::MaybeRecycleCo(lua_State* co, int status, int nresults) {
+    std::string error_msg;
     if (status != LUA_OK && status != LUA_YIELD) {
-        spdlog::error("LuaRuntime: {}",
-                      lua_tostring(co, -1) ? lua_tostring(co, -1) : "unknown error");
+        const char* err = lua_tostring(co, -1);
+        error_msg = err ? err : "unknown error";
+        spdlog::error("LuaRuntime: {}", error_msg);
         lua_pop(co, 1);
     }
     if (status != LUA_YIELD) {
         // Fulfill pending script promise if any
         auto it = script_promises_.find(co);
         if (it != script_promises_.end()) {
-            it->second.setValue(status);
+            ScriptResult result;
+            result.status = status;
+            if (status == LUA_OK) {
+                result.values = PeekValues(co, nresults);
+            } else {
+                result.error = std::move(error_msg);
+            }
+            it->second.setValue(std::move(result));
             script_promises_.erase(it);
         }
         ReleaseCo(co);
@@ -474,14 +483,14 @@ void LuaRuntime::ProcessExpiredTimers() {
         if (entry.type == TimerType::kSleep) {
             int nresults = 0;
             int status = lua_resume(entry.co, main_L, 0, &nresults);
-            MaybeRecycleCo(entry.co, status);
+            MaybeRecycleCo(entry.co, status, nresults);
         } else {
             lua_State* cb_co = AcquireCo();
             lua_rawgeti(cb_co, LUA_REGISTRYINDEX, entry.fn_ref);
             luaL_unref(main_L, LUA_REGISTRYINDEX, entry.fn_ref);
             int nresults = 0;
             int status = lua_resume(cb_co, main_L, 0, &nresults);
-            MaybeRecycleCo(cb_co, status);
+            MaybeRecycleCo(cb_co, status, nresults);
         }
     }
 }
@@ -515,7 +524,7 @@ bool LuaRuntime::DrainOneCallback() {
 
     int nresults = 0;
     int status = lua_resume(cb_co, main_L, static_cast<int>(cb.second.size()), &nresults);
-    MaybeRecycleCo(cb_co, status);
+    MaybeRecycleCo(cb_co, status, nresults);
     return true;
 }
 
@@ -536,10 +545,14 @@ bool LuaRuntime::DrainOneScript() {
         load_result = luaL_loadbuffer(co, req.chunk.c_str(), req.chunk.size(), req.name.c_str());
     }
     if (load_result != LUA_OK) {
-        spdlog::error("LuaRuntime: {}", lua_tostring(co, -1));
+        const char* err = lua_tostring(co, -1);
+        spdlog::error("LuaRuntime: {}", err ? err : "unknown error");
         lua_pop(co, 1);
         ReleaseCo(co);
-        req.promise.setValue(load_result);
+        ScriptResult result;
+        result.status = load_result;
+        result.error = err ? err : "unknown error";
+        req.promise.setValue(std::move(result));
         return true;
     }
 
@@ -551,7 +564,7 @@ bool LuaRuntime::DrainOneScript() {
     script_promises_[co] = std::move(req.promise);
 
     if (status != LUA_YIELD) {
-        MaybeRecycleCo(co, status);
+        MaybeRecycleCo(co, status, nresults);
     }
     return true;
 }
@@ -600,8 +613,45 @@ LuaRuntime::ResumeResult LuaRuntime::DoResume(AsyncHandle handle, std::vector<Lu
     int nresults = 0;
     int status = lua_resume(co, main_L, static_cast<int>(args.size()), &nresults);
     spdlog::debug("DoResume handle={}: lua_resume status={}", handle, status);
-    MaybeRecycleCo(co, status);
+    MaybeRecycleCo(co, status, nresults);
     return {co, status};
+}
+
+std::vector<LuaValue> LuaRuntime::PeekValues(lua_State* L, int nresults) {
+    std::vector<LuaValue> result;
+    result.reserve(nresults);
+    for (int i = -nresults; i < 0; ++i) {
+        int t = lua_type(L, i);
+        if (t == LUA_TNIL) {
+            result.push_back(nullptr);
+        } else if (t == LUA_TBOOLEAN) {
+            result.push_back(static_cast<bool>(lua_toboolean(L, i)));
+        } else if (t == LUA_TNUMBER) {
+            if (lua_isinteger(L, i)) {
+                result.push_back(static_cast<int64_t>(lua_tointeger(L, i)));
+            } else {
+                result.push_back(static_cast<double>(lua_tonumber(L, i)));
+            }
+        } else if (t == LUA_TSTRING) {
+            size_t len;
+            const char* s = lua_tolstring(L, i, &len);
+            result.push_back(std::string(s, len));
+        } else {
+            // Tables, functions, userdata etc. — convert to string via tostring
+            lua_getglobal(L, "tostring");
+            lua_pushvalue(L, i);
+            int pcall_status = lua_pcall(L, 1, 1, 0);
+            if (pcall_status == LUA_OK) {
+                size_t len;
+                const char* s = lua_tolstring(L, -1, &len);
+                result.push_back(std::string(s ? s : "", len));
+            } else {
+                lua_pop(L, 1);  // pop pcall error
+                result.push_back(std::string("<") + lua_typename(L, t) + ">");
+            }
+        }
+    }
+    return result;
 }
 
 void LuaRuntime::PushValues(lua_State* L, const std::vector<LuaValue>& values) {

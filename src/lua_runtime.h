@@ -30,6 +30,12 @@ extern "C" {
 using AsyncHandle = int64_t;
 using LuaValue = std::variant<std::nullptr_t, bool, int64_t, double, std::string>;
 
+struct ScriptResult {
+    int status = LUA_ERRRUN;
+    std::vector<LuaValue> values;
+    std::string error;
+};
+
 class LuaRuntimeFactory;
 
 class LuaRuntime : public std::enable_shared_from_this<LuaRuntime> {
@@ -38,8 +44,8 @@ public:
 
     ~LuaRuntime();
 
-    async_simple::coro::Lazy<int> RunScript(const std::string& script);
-    async_simple::coro::Lazy<int> RunFile(const std::string& filename);
+    async_simple::coro::Lazy<ScriptResult> RunScript(const std::string& script);
+    async_simple::coro::Lazy<ScriptResult> RunFile(const std::string& filename);
 
     static Ptr FromLuaState(lua_State* L);
 
@@ -108,7 +114,7 @@ private:
     struct ScriptRequest {
         std::string chunk;
         std::string name;
-        async_simple::Promise<int> promise;
+        async_simple::Promise<ScriptResult> promise;
     };
 
     ResumeResult DoResume(AsyncHandle handle, std::vector<LuaValue> args);
@@ -116,7 +122,8 @@ private:
     bool DrainOneResume();
     bool DrainOneCallback();
     bool DrainOneScript();
-    void MaybeRecycleCo(lua_State* co, int status);
+    void MaybeRecycleCo(lua_State* co, int status, int nresults);
+    std::vector<LuaValue> PeekValues(lua_State* L, int nresults);
     void PushValues(lua_State* L, const std::vector<LuaValue>& values);
 
     std::unique_ptr<sol::state> lua_;
@@ -141,5 +148,5 @@ private:
     std::thread event_loop_thread_;
     std::atomic<bool> running_{false};
     std::queue<ScriptRequest> script_queue_;
-    std::unordered_map<lua_State*, async_simple::Promise<int>> script_promises_;
+    std::unordered_map<lua_State*, async_simple::Promise<ScriptResult>> script_promises_;
 };
