@@ -297,20 +297,20 @@ LuaRuntime::~LuaRuntime() {
     for (auto& ext : extensions_) {
         ext->OnShutdown(main_L);
     }
-    for (auto& [handle, entry] : pending_) {
-        luaL_unref(main_L, LUA_REGISTRYINDEX, entry.registry_ref);
-    }
     for (auto& [deadline, entry] : timer_queue_) {
         if (entry.fn_ref != LUA_NOREF) {
             luaL_unref(main_L, LUA_REGISTRYINDEX, entry.fn_ref);
         }
     }
-    for (auto& [co, ref] : active_callback_co_map_) {
-        luaL_unref(main_L, LUA_REGISTRYINDEX, ref);
-    }
     while (!callback_queue_.empty()) {
         luaL_unref(main_L, LUA_REGISTRYINDEX, callback_queue_.front().first);
         callback_queue_.pop();
+    }
+    for (auto& [co, ref] : active_co_refs_) {
+        luaL_unref(main_L, LUA_REGISTRYINDEX, ref);
+    }
+    for (auto& [co, ref] : co_pool_) {
+        luaL_unref(main_L, LUA_REGISTRYINDEX, ref);
     }
 }
 
@@ -337,15 +337,40 @@ void LuaRuntime::CancelTimer(AsyncHandle handle) {
     }
 }
 
-void LuaRuntime::MaybeRecycleCallbackCo(lua_State* co, int status) {
+lua_State* LuaRuntime::AcquireCo() {
+    lua_State* main_L = lua_->lua_state();
+    if (!co_pool_.empty()) {
+        auto [co, ref] = co_pool_.back();
+        co_pool_.pop_back();
+        active_co_refs_[co] = ref;
+        return co;
+    }
+    
+    lua_State* co = lua_newthread(main_L);
+    int ref = luaL_ref(main_L, LUA_REGISTRYINDEX);
+    SetExtraspace(co, this);
+    active_co_refs_[co] = ref;
+    return co;
+}
+
+void LuaRuntime::ReleaseCo(lua_State* co) {
     std::lock_guard<std::mutex> lock(mutex_);
-    auto it = active_callback_co_map_.find(co);
-    if (it == active_callback_co_map_.end()) return;
-    int co_ref = it->second;
-    active_callback_co_map_.erase(it);
+    lua_settop(co, 0);
+    auto it = active_co_refs_.find(co);
+    if (it != active_co_refs_.end()) {
+        co_pool_.push_back({co, it->second});
+        active_co_refs_.erase(it);
+    }
+}
+
+void LuaRuntime::MaybeRecycleCo(lua_State* co, int status) {
+    if (status != LUA_OK && status != LUA_YIELD) {
+        spdlog::error("LuaRuntime::Resume: {}",
+                      lua_tostring(co, -1) ? lua_tostring(co, -1) : "unknown error");
+        lua_pop(co, 1);
+    }
     if (status != LUA_YIELD) {
-        lua_State* main_L = lua_->lua_state();
-        luaL_unref(main_L, LUA_REGISTRYINDEX, co_ref);
+        ReleaseCo(co);
     }
 }
 
@@ -358,14 +383,9 @@ void LuaRuntime::CallLuaFunction(int fn_ref, std::vector<LuaValue> args) {
 }
 
 AsyncHandle LuaRuntime::PreYield(lua_State* co) {
-    lua_State* main_L = lua_->lua_state();
-    lua_pushthread(co);
-    lua_xmove(co, main_L, 1);
-    int ref = luaL_ref(main_L, LUA_REGISTRYINDEX);
-
     std::lock_guard<std::mutex> lock(mutex_);
     auto handle = next_handle_++;
-    pending_[handle] = {co, ref};
+    pending_[handle] = {co};
     return handle;
 }
 
@@ -415,36 +435,21 @@ void LuaRuntime::ProcessExpiredTimers(lua_State* main_co, int& main_status) {
             if (entry.co == main_co) {
                 main_status = status;
             }
-            MaybeRecycleCallbackCo(entry.co, status);
-            if (status != LUA_OK && status != LUA_YIELD) {
-                spdlog::error("LuaRuntime: {}",
-                              lua_tostring(entry.co, -1) ? lua_tostring(entry.co, -1)
-                                                          : "unknown error");
-                lua_pop(entry.co, 1);
-            }
+            MaybeRecycleCo(entry.co, status);
         } else {
-            lua_rawgeti(main_L, LUA_REGISTRYINDEX, entry.fn_ref);
+            lua_State* cb_co = AcquireCo();
+            lua_rawgeti(cb_co, LUA_REGISTRYINDEX, entry.fn_ref);
             luaL_unref(main_L, LUA_REGISTRYINDEX, entry.fn_ref);
-            if (lua_pcall(main_L, 0, 0, 0) != LUA_OK) {
-                spdlog::error("setTimeout: {}",
-                              lua_tostring(main_L, -1) ? lua_tostring(main_L, -1)
-                                                       : "unknown error");
-                lua_pop(main_L, 1);
-            }
+            int nresults = 0;
+            int status = lua_resume(cb_co, main_L, 0, &nresults);
+            MaybeRecycleCo(cb_co, status);
+
         }
     }
 }
 
 int LuaRuntime::RunInCoroutine(const std::string& chunk, const std::string& name) {
-    lua_State* main_L = lua_->lua_state();
-    lua_newthread(main_L);
-    int thread_ref = luaL_ref(main_L, LUA_REGISTRYINDEX);
-
-    lua_rawgeti(main_L, LUA_REGISTRYINDEX, thread_ref);
-    lua_State* co = lua_tothread(main_L, -1);
-    lua_pop(main_L, 1);
-    SetExtraspace(co, this);
-
+    lua_State* co = AcquireCo();
     int load_result;
     if (chunk.empty()) {
         load_result = luaL_loadfile(co, name.c_str());
@@ -453,11 +458,11 @@ int LuaRuntime::RunInCoroutine(const std::string& chunk, const std::string& name
     }
     if (load_result != LUA_OK) {
         spdlog::error("LuaRuntime: {}", lua_tostring(co, -1));
-        lua_pop(co, 1);
-        luaL_unref(main_L, LUA_REGISTRYINDEX, thread_ref);
+        ReleaseCo(co);
         return load_result;
     }
 
+    lua_State* main_L = lua_->lua_state();
     int nresults = 0;
     int main_status = lua_resume(co, main_L, 0, &nresults);
 
@@ -489,40 +494,24 @@ int LuaRuntime::RunInCoroutine(const std::string& chunk, const std::string& name
                 cb = std::move(callback_queue_.front());
                 callback_queue_.pop();
             }
-            lua_newthread(main_L);
-            int co_ref = luaL_ref(main_L, LUA_REGISTRYINDEX);
-
-            lua_rawgeti(main_L, LUA_REGISTRYINDEX, co_ref);
-            lua_State* cb_co = lua_tothread(main_L, -1);
-            lua_pop(main_L, 1);
-            SetExtraspace(cb_co, this);
+            lua_State* cb_co = AcquireCo();
 
             lua_rawgeti(cb_co, LUA_REGISTRYINDEX, cb.first);
             luaL_unref(main_L, LUA_REGISTRYINDEX, cb.first);
             PushValues(cb_co, cb.second);
 
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                active_callback_co_map_[cb_co] = co_ref;
-            }
-
             int nresults = 0;
             int status = lua_resume(cb_co, main_L, static_cast<int>(cb.second.size()), &nresults);
-
-            MaybeRecycleCallbackCo(cb_co, status);
-            if (status != LUA_OK && status != LUA_YIELD) {
-                spdlog::error("LuaRuntime callback: {}",
-                              lua_tostring(cb_co, -1) ? lua_tostring(cb_co, -1) : "unknown error");
-                lua_pop(cb_co, 1);
-            }
+            MaybeRecycleCo(cb_co, status);
         }
 
         // 4. Check exit: all done when main finished and nothing pending
         bool has_work;
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            // co_refs_ includes main_co, so check size > 1 for active callback threads
             has_work = !pending_.empty() || !timer_queue_.empty()
-                       || !callback_queue_.empty() || !active_callback_co_map_.empty();
+                       || !callback_queue_.empty() || active_co_refs_.size() > 1;
         }
         if (main_status != LUA_YIELD && !has_work) break;
 
@@ -541,19 +530,14 @@ int LuaRuntime::RunInCoroutine(const std::string& chunk, const std::string& name
         }
     }
 
-    luaL_unref(main_L, LUA_REGISTRYINDEX, thread_ref);
-
+    // Main coroutine done: return to pool
+    MaybeRecycleCo(co, main_status);
     if (main_status == LUA_OK) return LUA_OK;
-
-    spdlog::error("LuaRuntime: {}",
-                  lua_tostring(co, -1) ? lua_tostring(co, -1) : "unknown error");
-    lua_pop(co, 1);
     return main_status;
 }
 
 LuaRuntime::ResumeResult LuaRuntime::DoResume(AsyncHandle handle, std::vector<LuaValue> args) {
     lua_State* co = nullptr;
-    int ref = LUA_NOREF;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = pending_.find(handle);
@@ -562,26 +546,14 @@ LuaRuntime::ResumeResult LuaRuntime::DoResume(AsyncHandle handle, std::vector<Lu
             return {nullptr, LUA_ERRRUN};
         }
         co = it->second.co;
-        ref = it->second.registry_ref;
         pending_.erase(it);
     }
-
     PushValues(co, args);
-
     lua_State* main_L = lua_->lua_state();
     int nresults = 0;
     int status = lua_resume(co, main_L, static_cast<int>(args.size()), &nresults);
-
     spdlog::debug("DoResume handle={}: lua_resume status={}", handle, status);
-
-    MaybeRecycleCallbackCo(co, status);
-    luaL_unref(main_L, LUA_REGISTRYINDEX, ref);
-
-    if (status != LUA_OK && status != LUA_YIELD) {
-        spdlog::error("LuaRuntime::Resume: {}",
-                      lua_tostring(co, -1) ? lua_tostring(co, -1) : "unknown error");
-        lua_pop(co, 1);
-    }
+    MaybeRecycleCo(co, status);
     return {co, status};
 }
 

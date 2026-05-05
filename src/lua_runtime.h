@@ -68,9 +68,12 @@ private:
 
     void CancelTimer(AsyncHandle handle);
 
+    // Lua thread pool: acquire from pool or create new, release back when done
+    lua_State* AcquireCo();
+    void ReleaseCo(lua_State* co);
+
     struct PendingEntry {
         lua_State* co;
-        int registry_ref;
     };
 
     struct ResumeRequest {
@@ -95,7 +98,7 @@ private:
     int RunInCoroutine(const std::string& chunk, const std::string& name);
     ResumeResult DoResume(AsyncHandle handle, std::vector<LuaValue> args);
     void ProcessExpiredTimers(lua_State* main_co, int& main_status);
-    void MaybeRecycleCallbackCo(lua_State* co, int status);
+    void MaybeRecycleCo(lua_State* co, int status);
     void PushValues(lua_State* L, const std::vector<LuaValue>& values);
 
     std::unique_ptr<sol::state> lua_;
@@ -110,5 +113,9 @@ private:
     std::multimap<int64_t, TimerEntry> timer_queue_;
     AsyncHandle next_handle_ = 1;
     std::queue<std::pair<int, std::vector<LuaValue>>> callback_queue_;
-    std::unordered_map<lua_State*, int> active_callback_co_map_;
+
+    // Active threads and their registry refs
+    std::unordered_map<lua_State*, int> active_co_refs_;
+    // Thread pool: idle threads with their registry refs
+    std::vector<std::pair<lua_State*, int>> co_pool_;
 };
