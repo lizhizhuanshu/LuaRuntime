@@ -651,6 +651,111 @@ TEST_F(LuaRuntimeTest, ReleaseRefsBatch) {
     EXPECT_EQ(r.status, LUA_OK);
 }
 
+// --- CallFunction ---
+
+TEST_F(LuaRuntimeTest, CallFunctionReturnsValues) {
+    lua_State* main_L = rt->lua().lua_state();
+    lua_pushcfunction(main_L, [](lua_State* L) -> int {
+        int a = static_cast<int>(luaL_checkinteger(L, 1));
+        int b = static_cast<int>(luaL_checkinteger(L, 2));
+        lua_pushinteger(L, a + b);
+        lua_pushinteger(L, a * b);
+        return 2;
+    });
+    int fn_ref = luaL_ref(main_L, LUA_REGISTRYINDEX);
+
+    auto r = AWAIT(rt->CallFunction(fn_ref, {static_cast<int64_t>(3), static_cast<int64_t>(4)}));
+    EXPECT_EQ(r.status, LUA_OK);
+    ASSERT_EQ(r.values.size(), 2u);
+    EXPECT_EQ(std::get<int64_t>(r.values[0]), 7);
+    EXPECT_EQ(std::get<int64_t>(r.values[1]), 12);
+    rt->ReleaseRefs({fn_ref});
+}
+
+TEST_F(LuaRuntimeTest, CallFunctionReturnsString) {
+    lua_State* main_L = rt->lua().lua_state();
+    lua_pushcfunction(main_L, [](lua_State* L) -> int {
+        lua_pushstring(L, "hello from CallFunction");
+        return 1;
+    });
+    int fn_ref = luaL_ref(main_L, LUA_REGISTRYINDEX);
+
+    auto r = AWAIT(rt->CallFunction(fn_ref));
+    EXPECT_EQ(r.status, LUA_OK);
+    ASSERT_EQ(r.values.size(), 1u);
+    EXPECT_EQ(std::get<std::string>(r.values[0]), "hello from CallFunction");
+    rt->ReleaseRefs({fn_ref});
+}
+
+TEST_F(LuaRuntimeTest, CallFunctionReturnsTable) {
+    lua_State* main_L = rt->lua().lua_state();
+    AWAIT(rt->RunScript(R"(
+        _test_add = function(a, b) return {sum = a + b, product = a * b} end
+    )"));
+    lua_getglobal(main_L, "_test_add");
+    int fn_ref = luaL_ref(main_L, LUA_REGISTRYINDEX);
+
+    auto r = AWAIT(rt->CallFunction(fn_ref, {static_cast<int64_t>(5), static_cast<int64_t>(6)}));
+    EXPECT_EQ(r.status, LUA_OK);
+    ASSERT_EQ(r.values.size(), 1u);
+    ASSERT_TRUE(std::holds_alternative<LuaRef>(r.values[0]));
+    // Can't easily verify table contents from C++, just check type
+    EXPECT_EQ(std::get<LuaRef>(r.values[0]).type, LUA_TTABLE);
+    rt->ReleaseRefs({fn_ref});
+    rt->ReleaseRefs({std::get<LuaRef>(r.values[0]).ref});
+}
+
+TEST_F(LuaRuntimeTest, CallFunctionReturnsError) {
+    lua_State* main_L = rt->lua().lua_state();
+    lua_pushcfunction(main_L, [](lua_State* L) -> int {
+        return luaL_error(L, "intentional error");
+    });
+    int fn_ref = luaL_ref(main_L, LUA_REGISTRYINDEX);
+
+    auto r = AWAIT(rt->CallFunction(fn_ref));
+    EXPECT_NE(r.status, LUA_OK);
+    EXPECT_NE(r.error.find("intentional error"), std::string::npos);
+    rt->ReleaseRefs({fn_ref});
+}
+
+TEST_F(LuaRuntimeTest, CallFunctionNoArgs) {
+    lua_State* main_L = rt->lua().lua_state();
+    lua_pushcfunction(main_L, [](lua_State* L) -> int {
+        lua_pushinteger(L, 42);
+        return 1;
+    });
+    int fn_ref = luaL_ref(main_L, LUA_REGISTRYINDEX);
+
+    auto r = AWAIT(rt->CallFunction(fn_ref));
+    EXPECT_EQ(r.status, LUA_OK);
+    ASSERT_EQ(r.values.size(), 1u);
+    EXPECT_EQ(std::get<int64_t>(r.values[0]), 42);
+    rt->ReleaseRefs({fn_ref});
+}
+
+TEST_F(LuaRuntimeTest, CallFunctionCanYield) {
+    lua_State* main_L = rt->lua().lua_state();
+    lua_pushcfunction(main_L, [](lua_State* L) -> int {
+        auto rt = LuaRuntime::FromLuaState(L);
+        int ms = static_cast<int>(luaL_checkinteger(L, 1));
+        auto handle = rt->PreYield(L);
+        std::thread([rt, handle, ms]() {
+            std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+            rt->Resume(handle);
+        }).detach();
+        return rt->Yield(L);
+    });
+    int fn_ref = luaL_ref(main_L, LUA_REGISTRYINDEX);
+
+    auto start = std::chrono::steady_clock::now();
+    auto r = AWAIT(rt->CallFunction(fn_ref, {static_cast<int64_t>(50)}));
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start).count();
+    EXPECT_EQ(r.status, LUA_OK);
+    EXPECT_GE(elapsed, 30);
+    rt->ReleaseRefs({fn_ref});
+}
+
 // --- Factory: shared config across multiple runtimes ---
 
 class LuaRuntimeFactoryTest : public ::testing::Test {

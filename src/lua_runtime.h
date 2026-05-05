@@ -52,7 +52,7 @@ public:
 
     async_simple::coro::Lazy<ScriptResult> RunScript(const std::string& script);
     async_simple::coro::Lazy<ScriptResult> RunFile(const std::string& filename);
-
+    async_simple::coro::Lazy<ScriptResult> CallFunction(int fn_ref, std::vector<LuaValue> args = {});
     static Ptr FromLuaState(lua_State* L);
 
     AsyncHandle PreYield(lua_State* L);
@@ -95,6 +95,8 @@ private:
     lua_State* AcquireCo();
     void ReleaseCo(lua_State* co);
 
+    // --- Request types ---
+
     struct PendingEntry {
         lua_State* co;
     };
@@ -118,21 +120,37 @@ private:
         AsyncHandle handle = 0;
     };
 
-    struct ScriptRequest {
+    // Unified task kind
+    struct LoadScript {
         std::string chunk;
         std::string name;
+    };
+
+    struct CallRef {
+        int fn_ref;
+        std::vector<LuaValue> args;
+        bool auto_unref = false;  // true for fire-and-forget callbacks (setTimeout)
+    };
+
+    using TaskKind = std::variant<LoadScript, CallRef>;
+
+    struct TaskRequest {
+        TaskKind kind;
         async_simple::Promise<ScriptResult> promise;
     };
+
+    // --- Internal methods ---
 
     ResumeResult DoResume(AsyncHandle handle, std::vector<LuaValue> args);
     void ProcessExpiredTimers();
     bool DrainOneResume();
-    bool DrainOneCallback();
     bool DrainOneRelease();
-    bool DrainOneScript();
+    bool DrainOneTask();
     void MaybeRecycleCo(lua_State* co, int status, int nresults);
     std::vector<LuaValue> PeekValues(lua_State* L, int nresults);
     void PushValues(lua_State* L, const std::vector<LuaValue>& values);
+
+    // --- Members ---
 
     std::unique_ptr<sol::state> lua_;
     std::shared_ptr<CodeProvider> code_provider_;
@@ -145,7 +163,7 @@ private:
     std::unordered_map<AsyncHandle, PendingEntry> pending_;
     std::multimap<int64_t, TimerEntry> timer_queue_;
     AsyncHandle next_handle_ = 1;
-    std::queue<std::pair<int, std::vector<LuaValue>>> callback_queue_;
+    std::queue<TaskRequest> task_queue_;
     std::queue<std::vector<int>> release_queue_;
 
     // Active threads and their registry refs
@@ -156,6 +174,5 @@ private:
     // Event loop thread
     std::thread event_loop_thread_;
     std::atomic<bool> running_{false};
-    std::queue<ScriptRequest> script_queue_;
     std::unordered_map<lua_State*, async_simple::Promise<ScriptResult>> script_promises_;
 };

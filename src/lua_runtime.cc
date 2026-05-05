@@ -7,6 +7,9 @@
 #include <spdlog/spdlog.h>
 
 namespace {
+template<class... Ts> struct overloaded : Ts... { using Ts::operator()...; };
+template<class... Ts> overloaded(Ts...) -> overloaded<Ts...>;
+
 void SetExtraspace(lua_State* L, LuaRuntime* rt) {
     std::memcpy(lua_getextraspace(L), &rt, sizeof(rt));
 }
@@ -317,19 +320,22 @@ LuaRuntime::~LuaRuntime() {
             luaL_unref(main_L, LUA_REGISTRYINDEX, entry.fn_ref);
         }
     }
-    while (!callback_queue_.empty()) {
-        luaL_unref(main_L, LUA_REGISTRYINDEX, callback_queue_.front().first);
-        callback_queue_.pop();
+    while (!task_queue_.empty()) {
+        auto& req = task_queue_.front();
+        std::visit([&main_L, &req](const auto& kind) {
+            using T = std::decay_t<decltype(kind)>;
+            if constexpr (std::is_same_v<T, CallRef>) {
+                luaL_unref(main_L, LUA_REGISTRYINDEX, kind.fn_ref);
+            }
+            req.promise.setValue(ScriptResult{LUA_ERRRUN, {}, "runtime shutdown"});
+        }, req.kind);
+        task_queue_.pop();
     }
     while (!release_queue_.empty()) {
         for (int ref : release_queue_.front()) {
             luaL_unref(main_L, LUA_REGISTRYINDEX, ref);
         }
         release_queue_.pop();
-    }
-    while (!script_queue_.empty()) {
-        script_queue_.front().promise.setValue(ScriptResult{LUA_ERRRUN, {}, "runtime shutdown"});
-        script_queue_.pop();
     }
     for (auto& [co, promise] : script_promises_) {
         promise.setValue(ScriptResult{LUA_ERRRUN, {}, "runtime shutdown"});
@@ -356,7 +362,7 @@ async_simple::coro::Lazy<ScriptResult> LuaRuntime::RunScript(const std::string& 
     auto future = promise.getFuture();
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        script_queue_.push({script, "=script", std::move(promise)});
+        task_queue_.push({LoadScript{script, "=script"}, std::move(promise)});
     }
     cv_.notify_one();
     co_return co_await std::move(future);
@@ -367,7 +373,18 @@ async_simple::coro::Lazy<ScriptResult> LuaRuntime::RunFile(const std::string& fi
     auto future = promise.getFuture();
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        script_queue_.push({"", filename, std::move(promise)});
+        task_queue_.push({LoadScript{"", filename}, std::move(promise)});
+    }
+    cv_.notify_one();
+    co_return co_await std::move(future);
+}
+
+async_simple::coro::Lazy<ScriptResult> LuaRuntime::CallFunction(int fn_ref, std::vector<LuaValue> args) {
+    async_simple::Promise<ScriptResult> promise;
+    auto future = promise.getFuture();
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        task_queue_.push({CallRef{fn_ref, std::move(args), false}, std::move(promise)});
     }
     cv_.notify_one();
     co_return co_await std::move(future);
@@ -440,9 +457,10 @@ void LuaRuntime::MaybeRecycleCo(lua_State* co, int status, int nresults) {
 }
 
 void LuaRuntime::CallLuaFunction(int fn_ref, std::vector<LuaValue> args) {
+    async_simple::Promise<ScriptResult> promise;  // unused, fire-and-forget
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        callback_queue_.push({fn_ref, std::move(args)});
+        task_queue_.push({CallRef{fn_ref, std::move(args), false}, std::move(promise)});
     }
     cv_.notify_one();
 }
@@ -492,19 +510,16 @@ void LuaRuntime::ProcessExpiredTimers() {
         }
     }
 
-    lua_State* main_L = lua_->lua_state();
     for (auto& entry : expired) {
         if (entry.type == TimerType::kSleep) {
+            lua_State* main_L = lua_->lua_state();
             int nresults = 0;
             int status = lua_resume(entry.co, main_L, 0, &nresults);
             MaybeRecycleCo(entry.co, status, nresults);
         } else {
-            lua_State* cb_co = AcquireCo();
-            lua_rawgeti(cb_co, LUA_REGISTRYINDEX, entry.fn_ref);
-            luaL_unref(main_L, LUA_REGISTRYINDEX, entry.fn_ref);
-            int nresults = 0;
-            int status = lua_resume(cb_co, main_L, 0, &nresults);
-            MaybeRecycleCo(cb_co, status, nresults);
+            async_simple::Promise<ScriptResult> promise;  // unused, fire-and-forget
+            std::lock_guard<std::mutex> lock(mutex_);
+            task_queue_.push({CallRef{entry.fn_ref, {}, true}, std::move(promise)});
         }
     }
 }
@@ -518,26 +533,6 @@ bool LuaRuntime::DrainOneResume() {
         resume_queue_.pop();
     }
     DoResume(req.handle, std::move(req.args));
-    return true;
-}
-
-bool LuaRuntime::DrainOneCallback() {
-    std::pair<int, std::vector<LuaValue>> cb;
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (callback_queue_.empty()) return false;
-        cb = std::move(callback_queue_.front());
-        callback_queue_.pop();
-    }
-    lua_State* main_L = lua_->lua_state();
-    lua_State* cb_co = AcquireCo();
-
-    lua_rawgeti(cb_co, LUA_REGISTRYINDEX, cb.first);
-    PushValues(cb_co, cb.second);
-
-    int nresults = 0;
-    int status = lua_resume(cb_co, main_L, static_cast<int>(cb.second.size()), &nresults);
-    MaybeRecycleCo(cb_co, status, nresults);
     return true;
 }
 
@@ -556,39 +551,55 @@ bool LuaRuntime::DrainOneRelease() {
     return true;
 }
 
-bool LuaRuntime::DrainOneScript() {
-    ScriptRequest req;
+bool LuaRuntime::DrainOneTask() {
+    TaskRequest req;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (script_queue_.empty()) return false;
-        req = std::move(script_queue_.front());
-        script_queue_.pop();
+        if (task_queue_.empty()) return false;
+        req = std::move(task_queue_.front());
+        task_queue_.pop();
     }
 
     lua_State* co = AcquireCo();
-    int load_result;
-    if (req.chunk.empty()) {
-        load_result = luaL_loadfile(co, req.name.c_str());
-    } else {
-        load_result = luaL_loadbuffer(co, req.chunk.c_str(), req.chunk.size(), req.name.c_str());
-    }
-    if (load_result != LUA_OK) {
-        const char* err = lua_tostring(co, -1);
-        spdlog::error("LuaRuntime: {}", err ? err : "unknown error");
-        lua_pop(co, 1);
-        ReleaseCo(co);
-        ScriptResult result;
-        result.status = load_result;
-        result.error = err ? err : "unknown error";
-        req.promise.setValue(std::move(result));
-        return true;
-    }
-
     lua_State* main_L = lua_->lua_state();
-    int nresults = 0;
-    int status = lua_resume(co, main_L, 0, &nresults);
+    int nargs = 0;
 
-    // Always store promise in script_promises_ for unified fulfillment in MaybeRecycleCo
+    std::visit(overloaded{
+        [&](const LoadScript& s) {
+            int load_result;
+            if (s.chunk.empty()) {
+                load_result = luaL_loadfile(co, s.name.c_str());
+            } else {
+                load_result = luaL_loadbuffer(co, s.chunk.c_str(), s.chunk.size(), s.name.c_str());
+            }
+            if (load_result != LUA_OK) {
+                const char* err = lua_tostring(co, -1);
+                spdlog::error("LuaRuntime: {}", err ? err : "unknown error");
+                lua_pop(co, 1);
+                ReleaseCo(co);
+                ScriptResult result;
+                result.status = load_result;
+                result.error = err ? err : "unknown error";
+                req.promise.setValue(std::move(result));
+                co = nullptr;  // signal: no resume needed
+            }
+            // nargs stays 0 — loaded chunk takes no args
+        },
+        [&](const CallRef& c) {
+            lua_rawgeti(co, LUA_REGISTRYINDEX, c.fn_ref);
+            if (c.auto_unref) {
+                luaL_unref(main_L, LUA_REGISTRYINDEX, c.fn_ref);
+            }
+            PushValues(co, c.args);
+            nargs = static_cast<int>(c.args.size());
+        }
+    }, req.kind);
+
+    if (!co) return true;  // load error, already handled
+
+    int nresults = 0;
+    int status = lua_resume(co, main_L, nargs, &nresults);
+
     script_promises_[co] = std::move(req.promise);
 
     if (status != LUA_YIELD) {
@@ -603,13 +614,13 @@ void LuaRuntime::WaitOrTimeout() {
         int64_t deadline = timer_queue_.begin()->first;
         int64_t wait_ms = std::max<int64_t>(0, deadline - NowMs());
         cv_.wait_for(lock, std::chrono::milliseconds(wait_ms), [this] {
-            return !running_.load(std::memory_order_acquire) || !resume_queue_.empty() || !callback_queue_.empty()
-                   || !release_queue_.empty() || !script_queue_.empty();
+            return !running_.load(std::memory_order_acquire) || !resume_queue_.empty() || !task_queue_.empty()
+                   || !release_queue_.empty();
         });
     } else {
         cv_.wait(lock, [this] {
-            return !running_.load(std::memory_order_acquire) || !resume_queue_.empty() || !callback_queue_.empty()
-                   || !release_queue_.empty() || !script_queue_.empty();
+            return !running_.load(std::memory_order_acquire) || !resume_queue_.empty() || !task_queue_.empty()
+                   || !release_queue_.empty();
         });
     }
 }
@@ -618,9 +629,8 @@ void LuaRuntime::EventLoop() {
     while (running_.load(std::memory_order_acquire)) {
         ProcessExpiredTimers();
         while (DrainOneResume()) {}
-        while (DrainOneCallback()) {}
+        while (DrainOneTask()) {}
         while (DrainOneRelease()) {}
-        while (DrainOneScript()) {}
         WaitOrTimeout();
     }
 }
