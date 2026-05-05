@@ -28,7 +28,13 @@ extern "C" {
 #include "lua_extension.h"
 
 using AsyncHandle = int64_t;
-using LuaValue = std::variant<std::nullptr_t, bool, int64_t, double, std::string>;
+
+struct LuaRef {
+    int ref;   // LUA_REGISTRYINDEX ref
+    int type;  // lua_type value (LUA_TTABLE, LUA_TFUNCTION, LUA_TUSERDATA, LUA_TTHREAD)
+};
+
+using LuaValue = std::variant<std::nullptr_t, bool, int64_t, double, std::string, LuaRef>;
 
 struct ScriptResult {
     int status = LUA_ERRRUN;
@@ -56,7 +62,7 @@ public:
     void Resume(AsyncHandle handle, std::vector<LuaValue> args);
 
     void CallLuaFunction(int fn_ref, std::vector<LuaValue> args = {});
-    void ReleaseFunctionRefs(std::vector<int> fn_refs);
+    void ReleaseRefs(std::vector<int> fn_refs);
 
     sol::state& lua() { return *lua_; }
 

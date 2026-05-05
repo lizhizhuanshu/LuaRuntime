@@ -447,7 +447,7 @@ void LuaRuntime::CallLuaFunction(int fn_ref, std::vector<LuaValue> args) {
     cv_.notify_one();
 }
 
-void LuaRuntime::ReleaseFunctionRefs(std::vector<int> fn_refs) {
+void LuaRuntime::ReleaseRefs(std::vector<int> fn_refs) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         release_queue_.push(std::move(fn_refs));
@@ -666,18 +666,10 @@ std::vector<LuaValue> LuaRuntime::PeekValues(lua_State* L, int nresults) {
             const char* s = lua_tolstring(L, i, &len);
             result.push_back(std::string(s, len));
         } else {
-            // Tables, functions, userdata etc. — convert to string via tostring
-            lua_getglobal(L, "tostring");
+            // table, function, userdata, thread — store as registry ref
             lua_pushvalue(L, i);
-            int pcall_status = lua_pcall(L, 1, 1, 0);
-            if (pcall_status == LUA_OK) {
-                size_t len;
-                const char* s = lua_tolstring(L, -1, &len);
-                result.push_back(std::string(s ? s : "", len));
-            } else {
-                lua_pop(L, 1);  // pop pcall error
-                result.push_back(std::string("<") + lua_typename(L, t) + ">");
-            }
+            int ref = luaL_ref(L, LUA_REGISTRYINDEX);
+            result.push_back(LuaRef{ref, t});
         }
     }
     return result;
@@ -698,6 +690,8 @@ void LuaRuntime::PushValues(lua_State* L, const std::vector<LuaValue>& values) {
                     lua_pushnumber(L, static_cast<lua_Number>(val));
                 } else if constexpr (std::is_same_v<T, std::string>) {
                     lua_pushstring(L, val.c_str());
+                } else if constexpr (std::is_same_v<T, LuaRef>) {
+                    lua_rawgeti(L, LUA_REGISTRYINDEX, val.ref);
                 }
             },
             v);
