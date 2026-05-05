@@ -56,6 +56,7 @@ public:
     void Resume(AsyncHandle handle, std::vector<LuaValue> args);
 
     void CallLuaFunction(int fn_ref, std::vector<LuaValue> args = {});
+    void ReleaseFunctionRefs(std::vector<int> fn_refs);
 
     sol::state& lua() { return *lua_; }
 
@@ -121,6 +122,7 @@ private:
     void ProcessExpiredTimers();
     bool DrainOneResume();
     bool DrainOneCallback();
+    bool DrainOneRelease();
     bool DrainOneScript();
     void MaybeRecycleCo(lua_State* co, int status, int nresults);
     std::vector<LuaValue> PeekValues(lua_State* L, int nresults);
@@ -138,6 +140,7 @@ private:
     std::multimap<int64_t, TimerEntry> timer_queue_;
     AsyncHandle next_handle_ = 1;
     std::queue<std::pair<int, std::vector<LuaValue>>> callback_queue_;
+    std::queue<std::vector<int>> release_queue_;
 
     // Active threads and their registry refs
     std::unordered_map<lua_State*, int> active_co_refs_;

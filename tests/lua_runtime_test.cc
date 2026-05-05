@@ -508,6 +508,7 @@ TEST_F(LuaRuntimeTest, CallLuaFunctionFromCpp) {
         std::thread([rt, fn_ref]() {
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
             rt->CallLuaFunction(fn_ref);
+            rt->ReleaseFunctionRefs({fn_ref});
         }).detach();
         return 0;
     }, 1);
@@ -536,6 +537,7 @@ TEST_F(LuaRuntimeTest, CallLuaFunctionWithArgs) {
         std::thread([rt, fn_ref]() {
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
             rt->CallLuaFunction(fn_ref, {static_cast<int64_t>(42), std::string("hello")});
+            rt->ReleaseFunctionRefs({fn_ref});
         }).detach();
         return 0;
     }, 1);
@@ -551,6 +553,41 @@ TEST_F(LuaRuntimeTest, CallLuaFunctionWithArgs) {
         assert(got_a == 42, "expected 42 got " .. tostring(got_a))
         assert(got_b == "hello", "expected hello got " .. tostring(got_b))
     )")).status, LUA_OK);
+}
+
+TEST_F(LuaRuntimeTest, ReleaseFunctionRefsBatch) {
+    lua_State* main_L = rt->lua().lua_state();
+
+    // All ref operations must run on the Lua thread to avoid races with main_L
+    rt->lua().set_function("make_ref", [main_L]() -> int {
+        lua_pushcfunction(main_L, [](lua_State*) -> int { return 0; });
+        return luaL_ref(main_L, LUA_REGISTRYINDEX);
+    });
+    rt->lua().set_function("do_release", [this](sol::variadic_args va) {
+        std::vector<int> refs;
+        for (auto v : va) {
+            refs.push_back(v.as<int>());
+        }
+        rt->ReleaseFunctionRefs(std::move(refs));
+    });
+
+    // Create refs, release them, then verify slots are reused by new refs
+    auto r = AWAIT(rt->RunScript(R"(
+        local r1 = make_ref()
+        local r2 = make_ref()
+        local r3 = make_ref()
+        do_release(r1, r2, r3)
+        -- sleep yields; event loop processes release_queue_ before timer fires
+        sleep(10)
+        -- New refs should reuse the freed slots (Lua free list is LIFO)
+        local r4 = make_ref()
+        local r5 = make_ref()
+        local r6 = make_ref()
+        assert(r4 == r3, 'r4 should reuse r3 slot')
+        assert(r5 == r2, 'r5 should reuse r2 slot')
+        assert(r6 == r1, 'r6 should reuse r1 slot')
+    )"));
+    EXPECT_EQ(r.status, LUA_OK);
 }
 
 // --- Factory: shared config across multiple runtimes ---

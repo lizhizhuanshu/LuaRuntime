@@ -321,6 +321,12 @@ LuaRuntime::~LuaRuntime() {
         luaL_unref(main_L, LUA_REGISTRYINDEX, callback_queue_.front().first);
         callback_queue_.pop();
     }
+    while (!release_queue_.empty()) {
+        for (int ref : release_queue_.front()) {
+            luaL_unref(main_L, LUA_REGISTRYINDEX, ref);
+        }
+        release_queue_.pop();
+    }
     while (!script_queue_.empty()) {
         script_queue_.front().promise.setValue(ScriptResult{LUA_ERRRUN, {}, "runtime shutdown"});
         script_queue_.pop();
@@ -441,6 +447,14 @@ void LuaRuntime::CallLuaFunction(int fn_ref, std::vector<LuaValue> args) {
     cv_.notify_one();
 }
 
+void LuaRuntime::ReleaseFunctionRefs(std::vector<int> fn_refs) {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        release_queue_.push(std::move(fn_refs));
+    }
+    cv_.notify_one();
+}
+
 AsyncHandle LuaRuntime::PreYield(lua_State* co) {
     std::lock_guard<std::mutex> lock(mutex_);
     auto handle = next_handle_++;
@@ -519,12 +533,26 @@ bool LuaRuntime::DrainOneCallback() {
     lua_State* cb_co = AcquireCo();
 
     lua_rawgeti(cb_co, LUA_REGISTRYINDEX, cb.first);
-    luaL_unref(main_L, LUA_REGISTRYINDEX, cb.first);
     PushValues(cb_co, cb.second);
 
     int nresults = 0;
     int status = lua_resume(cb_co, main_L, static_cast<int>(cb.second.size()), &nresults);
     MaybeRecycleCo(cb_co, status, nresults);
+    return true;
+}
+
+bool LuaRuntime::DrainOneRelease() {
+    std::vector<int> refs;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (release_queue_.empty()) return false;
+        refs = std::move(release_queue_.front());
+        release_queue_.pop();
+    }
+    lua_State* main_L = lua_->lua_state();
+    for (int ref : refs) {
+        luaL_unref(main_L, LUA_REGISTRYINDEX, ref);
+    }
     return true;
 }
 
@@ -576,12 +604,12 @@ void LuaRuntime::WaitOrTimeout() {
         int64_t wait_ms = std::max<int64_t>(0, deadline - NowMs());
         cv_.wait_for(lock, std::chrono::milliseconds(wait_ms), [this] {
             return !running_.load(std::memory_order_acquire) || !resume_queue_.empty() || !callback_queue_.empty()
-                   || !script_queue_.empty();
+                   || !release_queue_.empty() || !script_queue_.empty();
         });
     } else {
         cv_.wait(lock, [this] {
             return !running_.load(std::memory_order_acquire) || !resume_queue_.empty() || !callback_queue_.empty()
-                   || !script_queue_.empty();
+                   || !release_queue_.empty() || !script_queue_.empty();
         });
     }
 }
@@ -591,6 +619,7 @@ void LuaRuntime::EventLoop() {
         ProcessExpiredTimers();
         while (DrainOneResume()) {}
         while (DrainOneCallback()) {}
+        while (DrainOneRelease()) {}
         while (DrainOneScript()) {}
         WaitOrTimeout();
     }
