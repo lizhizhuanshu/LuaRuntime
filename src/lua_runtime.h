@@ -7,6 +7,9 @@ extern "C" {
 #include <sol/sol.hpp>
 
 #include <async_simple/Executor.h>
+#include <async_simple/Promise.h>
+#include <async_simple/coro/FutureAwaiter.h>
+#include <async_simple/coro/Lazy.h>
 
 #include <condition_variable>
 #include <map>
@@ -15,6 +18,8 @@ extern "C" {
 #include <optional>
 #include <queue>
 #include <string>
+#include <atomic>
+#include <thread>
 #include <unordered_map>
 #include <variant>
 #include <vector>
@@ -33,8 +38,8 @@ public:
 
     ~LuaRuntime();
 
-    int RunScript(const std::string& script);
-    int RunFile(const std::string& filename);
+    async_simple::coro::Lazy<int> RunScript(const std::string& script);
+    async_simple::coro::Lazy<int> RunFile(const std::string& filename);
 
     static Ptr FromLuaState(lua_State* L);
 
@@ -66,9 +71,14 @@ private:
                     async_simple::Executor* executor,
                     const std::vector<std::shared_ptr<LuaExtension>>& extensions);
 
+    void Start();
+    void Stop();
+    void EventLoop();
+    void WaitOrTimeout();
+
     void CancelTimer(AsyncHandle handle);
 
-    // Lua thread pool: acquire from pool or create new, release back when done
+    // Lua thread pool
     lua_State* AcquireCo();
     void ReleaseCo(lua_State* co);
 
@@ -95,9 +105,17 @@ private:
         AsyncHandle handle = 0;
     };
 
-    int RunInCoroutine(const std::string& chunk, const std::string& name);
+    struct ScriptRequest {
+        std::string chunk;
+        std::string name;
+        async_simple::Promise<int> promise;
+    };
+
     ResumeResult DoResume(AsyncHandle handle, std::vector<LuaValue> args);
-    void ProcessExpiredTimers(lua_State* main_co, int& main_status);
+    void ProcessExpiredTimers();
+    bool DrainOneResume();
+    bool DrainOneCallback();
+    bool DrainOneScript();
     void MaybeRecycleCo(lua_State* co, int status);
     void PushValues(lua_State* L, const std::vector<LuaValue>& values);
 
@@ -118,4 +136,10 @@ private:
     std::unordered_map<lua_State*, int> active_co_refs_;
     // Thread pool: idle threads with their registry refs
     std::vector<std::pair<lua_State*, int>> co_pool_;
+
+    // Event loop thread
+    std::thread event_loop_thread_;
+    std::atomic<bool> running_{false};
+    std::queue<ScriptRequest> script_queue_;
+    std::unordered_map<lua_State*, async_simple::Promise<int>> script_promises_;
 };

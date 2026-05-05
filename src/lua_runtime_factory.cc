@@ -23,5 +23,6 @@ LuaRuntimeFactory& LuaRuntimeFactory::RegisterExtension(std::shared_ptr<LuaExten
 LuaRuntime::Ptr LuaRuntimeFactory::Create() {
     auto rt = std::shared_ptr<LuaRuntime>(new LuaRuntime());
     LuaRuntime::Setup(rt->lua(), code_provider_, c_modules_, executor_, extensions_);
+    rt->Start();
     return rt;
 }
