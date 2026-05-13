@@ -63,6 +63,15 @@ struct TaskRequest {
     async_simple::Promise<ScriptResult> promise;
 };
 
+struct ResumeRequest {
+    AsyncHandle handle;
+    std::vector<LuaValue> args;
+};
+
+using ReleaseRequest = std::vector<int>;  // LUA_REGISTRYINDEX refs to release
+
+using WorkItem = std::variant<TaskRequest, ResumeRequest, ReleaseRequest>;  // int refs to release
+
 // --- LuaContext: coroutine scheduler, builtins, and custom require ---
 
 class LuaContext : public std::enable_shared_from_this<LuaContext> {
@@ -103,12 +112,12 @@ public:
 
     void ProcessExpiredTimers();
     bool DrainOneResume();
-    bool DrainOneTask();
+    bool DrainOneWork();
     bool DrainOneRelease();
 
     // --- Timer management ---
 
-    void AddSleepTimer(int64_t deadline_ms, lua_State* co);
+    void AddSleepTimer(int64_t deadline_ms, AsyncHandle handle);
     AsyncHandle AddTimeoutTimer(int64_t deadline_ms, int fn_ref);
     void CancelTimer(AsyncHandle handle);
 
@@ -137,10 +146,7 @@ private:
         lua_State* co;
     };
 
-    struct ResumeRequest {
-        AsyncHandle handle;
-        std::vector<LuaValue> args;
-    };
+
 
     struct ResumeResult {
         lua_State* co = nullptr;
@@ -171,12 +177,11 @@ private:
 
     std::mutex mutex_;
     std::condition_variable cv_;
-    std::queue<ResumeRequest> resume_queue_;
+    bool shutting_down_ = false;
+    std::queue<WorkItem> work_queue_;
     std::unordered_map<AsyncHandle, PendingEntry> pending_;
     std::multimap<int64_t, TimerEntry> timer_queue_;
     AsyncHandle next_handle_ = 1;
-    std::queue<TaskRequest> task_queue_;
-    std::queue<std::vector<int>> release_queue_;
 
     // Active threads and their registry refs
     std::unordered_map<lua_State*, int> active_co_refs_;

@@ -90,11 +90,7 @@ void LuaRuntime::WaitOrTimeout() {
 void LuaRuntime::EventLoop() {
     while (running_.load(std::memory_order_acquire)) {
         context_->ProcessExpiredTimers();
-        while (context_->DrainOneResume()) {
-        }
-        while (context_->DrainOneTask()) {
-        }
-        while (context_->DrainOneRelease()) {
+        while (context_->DrainOneWork()) {
         }
         WaitOrTimeout();
     }
