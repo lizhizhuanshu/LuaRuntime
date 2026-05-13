@@ -14,8 +14,6 @@
 #include <unordered_map>
 #include <vector>
 
-class LuaRuntimeFactory;
-
 class LuaRuntime : public std::enable_shared_from_this<LuaRuntime> {
 public:
     using Ptr = std::shared_ptr<LuaRuntime>;
@@ -26,11 +24,24 @@ public:
     async_simple::coro::Lazy<ScriptResult> RunFile(const std::string& filename);
     async_simple::coro::Lazy<ScriptResult> CallFunction(int fn_ref, std::vector<LuaValue> args = {});
     sol::state& lua() { return *lua_; }
-    LuaContext& context() { return context_; }
+    LuaContext& context() { return *context_; }
+
+    class Builder {
+    public:
+        Builder& WithCodeProvider(std::shared_ptr<CodeProvider> provider);
+        Builder& WithExecutor(async_simple::Executor& executor);
+        Builder& Register(const std::string& name, lua_CFunction openf);
+        Builder& RegisterExtension(std::shared_ptr<LuaExtension> extension);
+        Ptr Create();
+
+    private:
+        std::shared_ptr<CodeProvider> code_provider_;
+        async_simple::Executor* executor_ = nullptr;
+        std::unordered_map<std::string, lua_CFunction> c_modules_;
+        std::vector<std::shared_ptr<LuaExtension>> extensions_;
+    };
 
 private:
-    friend class LuaRuntimeFactory;
-
     LuaRuntime();
 
     static void Setup(sol::state& lua, const std::shared_ptr<CodeProvider>& code_provider,
@@ -47,7 +58,7 @@ private:
     std::unique_ptr<sol::state> lua_;
 
     // Execution context (owns code_provider, extensions, config)
-    LuaContext context_;
+    LuaContext::Ptr context_;
 
     // Event loop
     std::thread event_loop_thread_;

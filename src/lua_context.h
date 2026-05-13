@@ -66,19 +66,19 @@ struct TaskRequest {
 
 // --- LuaContext: coroutine scheduler, builtins, and custom require ---
 
-class LuaContext {
+class LuaContext : public std::enable_shared_from_this<LuaContext> {
 public:
+    using Ptr = std::shared_ptr<LuaContext>;
     explicit LuaContext(lua_State* main_L);
     ~LuaContext();
 
     // --- Extraspace ---
 
     static void SetExtraspace(lua_State* L, LuaContext* ctx);
-    static LuaContext* FromLuaState(lua_State* L);
+    static Ptr FromLuaState(lua_State* L);
 
     // --- Configuration (set by LuaRuntime during setup) ---
 
-    void SetRuntime(LuaRuntime* rt) { runtime_ = rt; }
     void SetCodeProvider(std::shared_ptr<CodeProvider> provider) { code_provider_ = std::move(provider); }
     void SetExecutor(async_simple::Executor* executor) { executor_ = executor; }
     void SetCModules(std::unordered_map<std::string, lua_CFunction> modules) { c_modules_ = std::move(modules); }
@@ -87,7 +87,6 @@ public:
     CodeProvider* code_provider() const { return code_provider_.get(); }
     async_simple::Executor* executor() const { return executor_; }
     std::optional<lua_CFunction> find_c_module(const std::string& name) const;
-    LuaRuntime* runtime() const { return runtime_; }
     lua_State* main_state() const { return main_L_; }
 
     // --- Setup (called on main thread during initialization) ---
@@ -118,13 +117,6 @@ public:
 
     AsyncHandle PreYield(lua_State* co);
     static int Yield(lua_State* L);
-    void Resume(AsyncHandle handle);
-    void Resume(AsyncHandle handle, std::vector<LuaValue> args);
-
-    // --- Function / ref management ---
-
-    void CallLuaFunction(int fn_ref, std::vector<LuaValue> args = {});
-    void ReleaseRefs(std::vector<int> fn_refs);
 
     // --- Wait/signal for event loop ---
 
@@ -173,7 +165,6 @@ private:
 
     // Members
     lua_State* main_L_;
-    LuaRuntime* runtime_ = nullptr;
     std::shared_ptr<CodeProvider> code_provider_;
     std::vector<std::shared_ptr<LuaExtension>> extensions_;
     async_simple::Executor* executor_ = nullptr;

@@ -113,7 +113,7 @@ int custom_require(lua_State* L) {
     }
     lua_pop(L, 2);
 
-    auto* ctx = LuaContext::FromLuaState(L);
+    auto ctx = LuaContext::FromLuaState(L);
 
     // 2. Check C modules (synchronous)
     auto openf = ctx->find_c_module(name);
@@ -137,13 +137,11 @@ int custom_require(lua_State* L) {
             return luaL_error(L, "module '%s': executor required for CodeProvider", name);
         }
 
-        auto rt_shared = ctx->runtime()->shared_from_this();  // keep runtime alive
         auto handle = ctx->PreYield(L);
         auto* exec = ctx->executor();
         std::string module_name(name);  // safe capture for coroutine
 
-        [rt_shared, ctx, handle, exec, module_name = std::move(module_name)]() mutable -> async_simple::coro::Lazy<void> {
-            assert(ctx->runtime() && "runtime must be alive — rt_shared holds it");
+        [ctx, handle, exec, module_name = std::move(module_name)]() mutable -> async_simple::coro::Lazy<void> {
             auto source = co_await ctx->code_provider()->LoadModule(module_name);
             if (source.has_value()) {
                 ctx->PushResume(handle, {std::move(*source)});
@@ -179,7 +177,7 @@ int custom_loadfile(lua_State* L) {
         return 1;
     }
 
-    auto* ctx = LuaContext::FromLuaState(L);
+    auto ctx = LuaContext::FromLuaState(L);
     if (!ctx || !ctx->code_provider()) {
         lua_pushnil(L);
         lua_pushfstring(L, "cannot load relative file '%s': no CodeProvider", filename);
@@ -191,13 +189,11 @@ int custom_loadfile(lua_State* L) {
         return 2;
     }
 
-    auto rt_shared = ctx->runtime()->shared_from_this();  // keep runtime alive
     auto handle = ctx->PreYield(L);
     auto* exec = ctx->executor();
     std::string file_path(filename);  // safe capture for coroutine
 
-    [rt_shared, ctx, handle, exec, file_path = std::move(file_path)]() mutable -> async_simple::coro::Lazy<void> {
-        assert(ctx->runtime() && "runtime must be alive — rt_shared holds it");
+    [ctx, handle, exec, file_path = std::move(file_path)]() mutable -> async_simple::coro::Lazy<void> {
         auto source = co_await ctx->code_provider()->LoadFile(file_path);
         if (source.has_value()) {
             ctx->PushResume(handle, {std::move(*source)});
@@ -218,7 +214,7 @@ int lua_now(lua_State* L) {
 
 int lua_sleep(lua_State* L) {
     int ms = static_cast<int>(luaL_checkinteger(L, 1));
-    auto* ctx = LuaContext::FromLuaState(L);
+    auto ctx = LuaContext::FromLuaState(L);
     ctx->AddSleepTimer(NowMs() + ms, L);
     return LuaContext::Yield(L);
 }
@@ -226,7 +222,7 @@ int lua_sleep(lua_State* L) {
 int lua_set_timeout(lua_State* L) {
     int ms = static_cast<int>(luaL_checkinteger(L, 1));
     luaL_checktype(L, 2, LUA_TFUNCTION);
-    auto* ctx = LuaContext::FromLuaState(L);
+    auto ctx = LuaContext::FromLuaState(L);
 
     lua_State* main_L = ctx->main_state();
     lua_pushvalue(L, 2);
@@ -239,7 +235,7 @@ int lua_set_timeout(lua_State* L) {
 }
 
 int lua_clear_timeout(lua_State* L) {
-    auto* ctx = LuaContext::FromLuaState(L);
+    auto ctx = LuaContext::FromLuaState(L);
     auto handle = static_cast<AsyncHandle>(luaL_checkinteger(L, 1));
     ctx->CancelTimer(handle);
     return 0;
@@ -258,14 +254,9 @@ void LuaContext::SetExtraspace(lua_State* L, LuaContext* ctx) {
     std::memcpy(lua_getextraspace(L), &ctx, sizeof(ctx));
 }
 
-LuaContext* LuaContext::FromLuaState(lua_State* L) {
-    LuaContext* ctx = nullptr;
-    std::memcpy(&ctx, lua_getextraspace(L), sizeof(ctx));
-    if (!ctx) {
-        spdlog::error("LuaContext::FromLuaState: no context found");
-        throw std::runtime_error("LuaContext::FromLuaState: no context found");
-    }
-    return ctx;
+LuaContext::Ptr LuaContext::FromLuaState(lua_State* L) {
+    auto** ctx_ptr = reinterpret_cast<LuaContext**>(lua_getextraspace(L));
+    return ctx_ptr && *ctx_ptr ? (*ctx_ptr)->shared_from_this() : nullptr;
 }
 
 // --- Configuration accessors ---
@@ -502,23 +493,6 @@ AsyncHandle LuaContext::PreYield(lua_State* co) {
 
 int LuaContext::Yield(lua_State* L) {
     return lua_yield(L, 0);
-}
-
-void LuaContext::Resume(AsyncHandle handle) {
-    PushResume(handle);
-}
-
-void LuaContext::Resume(AsyncHandle handle, std::vector<LuaValue> args) {
-    PushResume(handle, std::move(args));
-}
-
-void LuaContext::CallLuaFunction(int fn_ref, std::vector<LuaValue> args) {
-    async_simple::Promise<ScriptResult> promise;  // unused, fire-and-forget
-    PushTask({CallRef{fn_ref, std::move(args), false}, std::move(promise)});
-}
-
-void LuaContext::ReleaseRefs(std::vector<int> fn_refs) {
-    PushRelease(std::move(fn_refs));
 }
 
 // --- Wait/signal queries (caller must hold mutex_) ---
