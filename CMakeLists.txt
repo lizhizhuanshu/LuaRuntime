@@ -58,6 +58,7 @@ FetchContent_MakeAvailable(spdlog)
 # ── LuaRuntime library ─────────────────────────────────────────────────────
 
 add_library(lua_runtime_lib STATIC
+    src/lua_context.cc
     src/lua_runtime.cc
     src/lua_runtime_factory.cc
 )

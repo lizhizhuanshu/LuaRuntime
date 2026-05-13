@@ -1,5 +1,6 @@
 #include "lua_runtime.h"
 #include "lua_runtime_factory.h"
+#include "lua_context.h"
 #include "lua_extension.h"
 
 #include <gtest/gtest.h>
@@ -103,36 +104,26 @@ TEST_F(LuaRuntimeTest, RunScriptReturnsNoValues) {
     EXPECT_TRUE(r.values.empty());
 }
 
-// --- FromLuaState ---
-
-TEST_F(LuaRuntimeTest, FromLuaStateReturnsCorrectRuntime) {
-    rt->lua()["get_rt"] = [this](sol::this_state s) -> int {
-        auto ptr = LuaRuntime::FromLuaState(s);
-        return ptr.get() == rt.get() ? 1 : 0;
-    };
-    EXPECT_EQ(AWAIT(rt->RunScript("assert(get_rt() == 1)")).status, LUA_OK);
-}
-
 // --- Async yield/resume: single ---
 
 TEST_F(LuaRuntimeTest, AsyncNoArgs) {
     rt->lua().set_function("async_noop", [](lua_State* L) -> int {
-        auto rt = LuaRuntime::FromLuaState(L);
-        auto handle = rt->PreYield(L);
-        std::thread([rt, handle]() { rt->Resume(handle); }).detach();
-        return rt->Yield(L);
+        auto* ctx = LuaContext::FromLuaState(L);
+        auto handle = ctx->PreYield(L);
+        std::thread([ctx, handle]() { ctx->Resume(handle); }).detach();
+        return ctx->Yield(L);
     });
     EXPECT_EQ(AWAIT(rt->RunScript("async_noop()")).status, LUA_OK);
 }
 
 TEST_F(LuaRuntimeTest, AsyncReturnsIntValue) {
     rt->lua().set_function("async_value", [](lua_State* L) -> int {
-        auto rt = LuaRuntime::FromLuaState(L);
-        auto handle = rt->PreYield(L);
-        std::thread([rt, handle]() {
-            rt->Resume(handle, {static_cast<int64_t>(99)});
+        auto* ctx = LuaContext::FromLuaState(L);
+        auto handle = ctx->PreYield(L);
+        std::thread([ctx, handle]() {
+            ctx->Resume(handle, {static_cast<int64_t>(99)});
         }).detach();
-        return rt->Yield(L);
+        return ctx->Yield(L);
     });
     EXPECT_EQ(AWAIT(rt->RunScript(R"(
         local v = async_value()
@@ -142,12 +133,12 @@ TEST_F(LuaRuntimeTest, AsyncReturnsIntValue) {
 
 TEST_F(LuaRuntimeTest, AsyncReturnsDoubleValue) {
     rt->lua().set_function("async_double", [](lua_State* L) -> int {
-        auto rt = LuaRuntime::FromLuaState(L);
-        auto handle = rt->PreYield(L);
-        std::thread([rt, handle]() {
-            rt->Resume(handle, {3.14});
+        auto* ctx = LuaContext::FromLuaState(L);
+        auto handle = ctx->PreYield(L);
+        std::thread([ctx, handle]() {
+            ctx->Resume(handle, {3.14});
         }).detach();
-        return rt->Yield(L);
+        return ctx->Yield(L);
     });
     EXPECT_EQ(AWAIT(rt->RunScript(R"(
         local v = async_double()
@@ -157,12 +148,12 @@ TEST_F(LuaRuntimeTest, AsyncReturnsDoubleValue) {
 
 TEST_F(LuaRuntimeTest, AsyncReturnsBoolValue) {
     rt->lua().set_function("async_bool", [](lua_State* L) -> int {
-        auto rt = LuaRuntime::FromLuaState(L);
-        auto handle = rt->PreYield(L);
-        std::thread([rt, handle]() {
-            rt->Resume(handle, {LuaValue{true}});
+        auto* ctx = LuaContext::FromLuaState(L);
+        auto handle = ctx->PreYield(L);
+        std::thread([ctx, handle]() {
+            ctx->Resume(handle, {LuaValue{true}});
         }).detach();
-        return rt->Yield(L);
+        return ctx->Yield(L);
     });
     EXPECT_EQ(AWAIT(rt->RunScript(R"(
         local v = async_bool()
@@ -172,12 +163,12 @@ TEST_F(LuaRuntimeTest, AsyncReturnsBoolValue) {
 
 TEST_F(LuaRuntimeTest, AsyncReturnsStringValue) {
     rt->lua().set_function("async_str", [](lua_State* L) -> int {
-        auto rt = LuaRuntime::FromLuaState(L);
-        auto handle = rt->PreYield(L);
-        std::thread([rt, handle]() {
-            rt->Resume(handle, {std::string("hello from C++")});
+        auto* ctx = LuaContext::FromLuaState(L);
+        auto handle = ctx->PreYield(L);
+        std::thread([ctx, handle]() {
+            ctx->Resume(handle, {std::string("hello from C++")});
         }).detach();
-        return rt->Yield(L);
+        return ctx->Yield(L);
     });
     EXPECT_EQ(AWAIT(rt->RunScript(R"(
         local v = async_str()
@@ -187,12 +178,12 @@ TEST_F(LuaRuntimeTest, AsyncReturnsStringValue) {
 
 TEST_F(LuaRuntimeTest, AsyncReturnsNilValue) {
     rt->lua().set_function("async_nil", [](lua_State* L) -> int {
-        auto rt = LuaRuntime::FromLuaState(L);
-        auto handle = rt->PreYield(L);
-        std::thread([rt, handle]() {
-            rt->Resume(handle, {LuaValue{nullptr}});
+        auto* ctx = LuaContext::FromLuaState(L);
+        auto handle = ctx->PreYield(L);
+        std::thread([ctx, handle]() {
+            ctx->Resume(handle, {LuaValue{nullptr}});
         }).detach();
-        return rt->Yield(L);
+        return ctx->Yield(L);
     });
     EXPECT_EQ(AWAIT(rt->RunScript("local v = async_nil(); assert(v == nil)")).status, LUA_OK);
 }
@@ -203,12 +194,12 @@ TEST_F(LuaRuntimeTest, SequentialAsyncCalls) {
     rt->lua().set_function("async_add", [](lua_State* L) -> int {
         int a = static_cast<int>(luaL_checkinteger(L, 1));
         int b = static_cast<int>(luaL_checkinteger(L, 2));
-        auto rt = LuaRuntime::FromLuaState(L);
-        auto handle = rt->PreYield(L);
-        std::thread([rt, handle, a, b]() {
-            rt->Resume(handle, {static_cast<int64_t>(a + b)});
+        auto* ctx = LuaContext::FromLuaState(L);
+        auto handle = ctx->PreYield(L);
+        std::thread([ctx, handle, a, b]() {
+            ctx->Resume(handle, {static_cast<int64_t>(a + b)});
         }).detach();
-        return rt->Yield(L);
+        return ctx->Yield(L);
     });
 
     EXPECT_EQ(AWAIT(rt->RunScript(R"(
@@ -226,12 +217,12 @@ TEST_F(LuaRuntimeTest, ConcurrentRuntimes) {
         auto r = LuaRuntimeFactory().Create();
         r->lua().set_function("async_id", [](lua_State* L) -> int {
             int id = static_cast<int>(luaL_checkinteger(L, 1));
-            auto rt = LuaRuntime::FromLuaState(L);
-            auto handle = rt->PreYield(L);
-            std::thread([rt, handle, id]() {
-                rt->Resume(handle, {static_cast<int64_t>(id)});
+            auto* ctx = LuaContext::FromLuaState(L);
+            auto handle = ctx->PreYield(L);
+            std::thread([ctx, handle, id]() {
+                ctx->Resume(handle, {static_cast<int64_t>(id)});
             }).detach();
-            return rt->Yield(L);
+            return ctx->Yield(L);
         });
         return r;
     };
@@ -501,14 +492,14 @@ TEST_F(LuaRuntimeTest, CallLuaFunctionFromCpp) {
     lua_pushlightuserdata(main_L, main_L);
     lua_pushcclosure(main_L, [](lua_State* L) -> int {
         luaL_checktype(L, 1, LUA_TFUNCTION);
-        auto rt = LuaRuntime::FromLuaState(L);
+        auto* ctx = LuaContext::FromLuaState(L);
         lua_pushvalue(L, 1);
         int fn_ref = luaL_ref(L, LUA_REGISTRYINDEX);
 
-        std::thread([rt, fn_ref]() {
+        std::thread([ctx, fn_ref]() {
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
-            rt->CallLuaFunction(fn_ref);
-            rt->ReleaseRefs({fn_ref});
+            ctx->CallLuaFunction(fn_ref);
+            ctx->ReleaseRefs({fn_ref});
         }).detach();
         return 0;
     }, 1);
@@ -530,14 +521,14 @@ TEST_F(LuaRuntimeTest, CallLuaFunctionWithArgs) {
     lua_pushlightuserdata(main_L, main_L);
     lua_pushcclosure(main_L, [](lua_State* L) -> int {
         luaL_checktype(L, 1, LUA_TFUNCTION);
-        auto rt = LuaRuntime::FromLuaState(L);
+        auto* ctx = LuaContext::FromLuaState(L);
         lua_pushvalue(L, 1);
         int fn_ref = luaL_ref(L, LUA_REGISTRYINDEX);
 
-        std::thread([rt, fn_ref]() {
+        std::thread([ctx, fn_ref]() {
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
-            rt->CallLuaFunction(fn_ref, {static_cast<int64_t>(42), std::string("hello")});
-            rt->ReleaseRefs({fn_ref});
+            ctx->CallLuaFunction(fn_ref, {static_cast<int64_t>(42), std::string("hello")});
+            ctx->ReleaseRefs({fn_ref});
         }).detach();
         return 0;
     }, 1);
@@ -563,7 +554,7 @@ TEST_F(LuaRuntimeTest, RunScriptReturnsTableAsLuaRef) {
     auto& lr = std::get<LuaRef>(r.values[0]);
     EXPECT_EQ(lr.type, LUA_TTABLE);
     EXPECT_NE(lr.ref, LUA_NOREF);
-    rt->ReleaseRefs({lr.ref});
+    rt->context().ReleaseRefs({lr.ref});
 }
 
 TEST_F(LuaRuntimeTest, RunScriptReturnsFunctionAsLuaRef) {
@@ -574,7 +565,7 @@ TEST_F(LuaRuntimeTest, RunScriptReturnsFunctionAsLuaRef) {
     auto& lr = std::get<LuaRef>(r.values[0]);
     EXPECT_EQ(lr.type, LUA_TFUNCTION);
     EXPECT_NE(lr.ref, LUA_NOREF);
-    rt->ReleaseRefs({lr.ref});
+    rt->context().ReleaseRefs({lr.ref});
 }
 
 TEST_F(LuaRuntimeTest, RunScriptReturnsMixedWithLuaRef) {
@@ -587,7 +578,7 @@ TEST_F(LuaRuntimeTest, RunScriptReturnsMixedWithLuaRef) {
     EXPECT_TRUE(std::holds_alternative<std::string>(r.values[2]));
     EXPECT_TRUE(std::holds_alternative<LuaRef>(r.values[3]));
     EXPECT_EQ(std::get<LuaRef>(r.values[3]).type, LUA_TFUNCTION);
-    rt->ReleaseRefs({std::get<LuaRef>(r.values[1]).ref,
+    rt->context().ReleaseRefs({std::get<LuaRef>(r.values[1]).ref,
                              std::get<LuaRef>(r.values[3]).ref});
 }
 
@@ -597,15 +588,15 @@ TEST_F(LuaRuntimeTest, LuaRefRoundTripViaResume) {
     lua_pushlightuserdata(main_L, main_L);
     lua_pushcclosure(main_L, [](lua_State* L) -> int {
         luaL_checktype(L, 1, LUA_TTABLE);
-        auto rt = LuaRuntime::FromLuaState(L);
+        auto* ctx = LuaContext::FromLuaState(L);
         lua_pushvalue(L, 1);
         int fn_ref = luaL_ref(L, LUA_REGISTRYINDEX);
-        auto handle = rt->PreYield(L);
-        std::thread([rt, handle, fn_ref]() {
-            rt->Resume(handle, {LuaValue{LuaRef{fn_ref, LUA_TTABLE}}});
-            rt->ReleaseRefs({fn_ref});
+        auto handle = ctx->PreYield(L);
+        std::thread([ctx, handle, fn_ref]() {
+            ctx->Resume(handle, {LuaValue{LuaRef{fn_ref, LUA_TTABLE}}});
+            ctx->ReleaseRefs({fn_ref});
         }).detach();
-        return rt->Yield(L);
+        return ctx->Yield(L);
     }, 1);
     lua_setglobal(main_L, "async_echo_table");
 
@@ -629,7 +620,7 @@ TEST_F(LuaRuntimeTest, ReleaseRefsBatch) {
         for (auto v : va) {
             refs.push_back(v.as<int>());
         }
-        rt->ReleaseRefs(std::move(refs));
+        rt->context().ReleaseRefs(std::move(refs));
     });
 
     // Create refs, release them, then verify slots are reused by new refs
@@ -669,7 +660,7 @@ TEST_F(LuaRuntimeTest, CallFunctionReturnsValues) {
     ASSERT_EQ(r.values.size(), 2u);
     EXPECT_EQ(std::get<int64_t>(r.values[0]), 7);
     EXPECT_EQ(std::get<int64_t>(r.values[1]), 12);
-    rt->ReleaseRefs({fn_ref});
+    rt->context().ReleaseRefs({fn_ref});
 }
 
 TEST_F(LuaRuntimeTest, CallFunctionReturnsString) {
@@ -684,7 +675,7 @@ TEST_F(LuaRuntimeTest, CallFunctionReturnsString) {
     EXPECT_EQ(r.status, LUA_OK);
     ASSERT_EQ(r.values.size(), 1u);
     EXPECT_EQ(std::get<std::string>(r.values[0]), "hello from CallFunction");
-    rt->ReleaseRefs({fn_ref});
+    rt->context().ReleaseRefs({fn_ref});
 }
 
 TEST_F(LuaRuntimeTest, CallFunctionReturnsTable) {
@@ -701,8 +692,8 @@ TEST_F(LuaRuntimeTest, CallFunctionReturnsTable) {
     ASSERT_TRUE(std::holds_alternative<LuaRef>(r.values[0]));
     // Can't easily verify table contents from C++, just check type
     EXPECT_EQ(std::get<LuaRef>(r.values[0]).type, LUA_TTABLE);
-    rt->ReleaseRefs({fn_ref});
-    rt->ReleaseRefs({std::get<LuaRef>(r.values[0]).ref});
+    rt->context().ReleaseRefs({fn_ref});
+    rt->context().ReleaseRefs({std::get<LuaRef>(r.values[0]).ref});
 }
 
 TEST_F(LuaRuntimeTest, CallFunctionReturnsError) {
@@ -715,7 +706,7 @@ TEST_F(LuaRuntimeTest, CallFunctionReturnsError) {
     auto r = AWAIT(rt->CallFunction(fn_ref));
     EXPECT_NE(r.status, LUA_OK);
     EXPECT_NE(r.error.find("intentional error"), std::string::npos);
-    rt->ReleaseRefs({fn_ref});
+    rt->context().ReleaseRefs({fn_ref});
 }
 
 TEST_F(LuaRuntimeTest, CallFunctionNoArgs) {
@@ -730,20 +721,20 @@ TEST_F(LuaRuntimeTest, CallFunctionNoArgs) {
     EXPECT_EQ(r.status, LUA_OK);
     ASSERT_EQ(r.values.size(), 1u);
     EXPECT_EQ(std::get<int64_t>(r.values[0]), 42);
-    rt->ReleaseRefs({fn_ref});
+    rt->context().ReleaseRefs({fn_ref});
 }
 
 TEST_F(LuaRuntimeTest, CallFunctionCanYield) {
     lua_State* main_L = rt->lua().lua_state();
     lua_pushcfunction(main_L, [](lua_State* L) -> int {
-        auto rt = LuaRuntime::FromLuaState(L);
+        auto* ctx = LuaContext::FromLuaState(L);
         int ms = static_cast<int>(luaL_checkinteger(L, 1));
-        auto handle = rt->PreYield(L);
-        std::thread([rt, handle, ms]() {
+        auto handle = ctx->PreYield(L);
+        std::thread([ctx, handle, ms]() {
             std::this_thread::sleep_for(std::chrono::milliseconds(ms));
-            rt->Resume(handle);
+            ctx->Resume(handle);
         }).detach();
-        return rt->Yield(L);
+        return ctx->Yield(L);
     });
     int fn_ref = luaL_ref(main_L, LUA_REGISTRYINDEX);
 
@@ -753,7 +744,7 @@ TEST_F(LuaRuntimeTest, CallFunctionCanYield) {
         std::chrono::steady_clock::now() - start).count();
     EXPECT_EQ(r.status, LUA_OK);
     EXPECT_GE(elapsed, 30);
-    rt->ReleaseRefs({fn_ref});
+    rt->context().ReleaseRefs({fn_ref});
 }
 
 // --- Factory: shared config across multiple runtimes ---
