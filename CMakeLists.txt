@@ -6,7 +6,6 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 include(FetchContent)
-set(FETCHCONTENT_BASE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/.deps)
 
 # ── Dependencies ────────────────────────────────────────────────────────────
 
@@ -17,7 +16,7 @@ set(ASYNC_SIMPLE_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(ASYNC_SIMPLE_ENABLE_BENCHMARKS OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(
     async_simple
-    GIT_REPOSITORY https://github.com/alibaba/async_simple.git
+    GIT_REPOSITORY https://github.com/lizhizhuanshu/async_simple.git
     GIT_TAG        main
 )
 FetchContent_MakeAvailable(async_simple)
