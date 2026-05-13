@@ -40,7 +40,7 @@ void LuaRuntime::Start() {
 
 void LuaRuntime::Stop() {
     running_.store(false, std::memory_order_release);
-    context().cv().notify_all();
+    context_->cv().notify_all();
     if (event_loop_thread_.joinable()) {
         event_loop_thread_.join();
     }
@@ -48,53 +48,53 @@ void LuaRuntime::Stop() {
 
 LuaRuntime::~LuaRuntime() {
     Stop();
-    context().Shutdown();
+    context_->Shutdown();
 }
 
 async_simple::coro::Lazy<ScriptResult> LuaRuntime::RunScript(const std::string& script) {
     async_simple::Promise<ScriptResult> promise;
     auto future = promise.getFuture();
-    context().PushTask({LoadScript{script, "=script"}, std::move(promise)});
+    context_->PushTask({LoadScript{script, "=script"}, std::move(promise)});
     co_return co_await std::move(future);
 }
 
 async_simple::coro::Lazy<ScriptResult> LuaRuntime::RunFile(const std::string& filename) {
     async_simple::Promise<ScriptResult> promise;
     auto future = promise.getFuture();
-    context().PushTask({LoadScript{"", filename}, std::move(promise)});
+    context_->PushTask({LoadScript{"", filename}, std::move(promise)});
     co_return co_await std::move(future);
 }
 
 async_simple::coro::Lazy<ScriptResult> LuaRuntime::CallFunction(int fn_ref, std::vector<LuaValue> args) {
     async_simple::Promise<ScriptResult> promise;
     auto future = promise.getFuture();
-    context().PushTask({CallRef{fn_ref, std::move(args), false}, std::move(promise)});
+    context_->PushTask({CallRef{fn_ref, std::move(args), false}, std::move(promise)});
     co_return co_await std::move(future);
 }
 
 void LuaRuntime::WaitOrTimeout() {
-    std::unique_lock<std::mutex> lock(context().mutex());
-    auto deadline = context().NextTimerDeadline();
+    std::unique_lock<std::mutex> lock(context_->mutex());
+    auto deadline = context_->NextTimerDeadline();
     if (deadline.has_value()) {
         int64_t wait_ms = std::max<int64_t>(0, *deadline - NowMs());
-        context().cv().wait_for(lock, std::chrono::milliseconds(wait_ms), [this] {
-            return !running_.load(std::memory_order_acquire) || context().HasWork();
+        context_->cv().wait_for(lock, std::chrono::milliseconds(wait_ms), [this] {
+            return !running_.load(std::memory_order_acquire) || context_->HasWork();
         });
     } else {
-        context().cv().wait(lock, [this] {
-            return !running_.load(std::memory_order_acquire) || context().HasWork();
+        context_->cv().wait(lock, [this] {
+            return !running_.load(std::memory_order_acquire) || context_->HasWork();
         });
     }
 }
 
 void LuaRuntime::EventLoop() {
     while (running_.load(std::memory_order_acquire)) {
-        context().ProcessExpiredTimers();
-        while (context().DrainOneResume()) {
+        context_->ProcessExpiredTimers();
+        while (context_->DrainOneResume()) {
         }
-        while (context().DrainOneTask()) {
+        while (context_->DrainOneTask()) {
         }
-        while (context().DrainOneRelease()) {
+        while (context_->DrainOneRelease()) {
         }
         WaitOrTimeout();
     }

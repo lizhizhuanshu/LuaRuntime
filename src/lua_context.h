@@ -21,7 +21,6 @@ extern "C" {
 #include "code_provider.h"
 #include "lua_extension.h"
 
-class LuaRuntime;
 
 namespace async_simple {
 class Executor;
