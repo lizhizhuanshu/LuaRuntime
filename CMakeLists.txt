@@ -101,6 +101,7 @@ add_library(lua_runtime_lib STATIC
     src/bt/script_node.cc
     src/bt/behavior_tree_engine.cc
     src/bt/tree_parser.cc
+    src/bt/sensor.cc
     src/bt/bt_library.cc
 )
 target_include_directories(lua_runtime_lib PUBLIC src/lua src/bt)

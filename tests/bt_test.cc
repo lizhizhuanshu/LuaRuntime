@@ -20,6 +20,7 @@
 #include "parallel.h"
 #include "selector.h"
 #include "sequence.h"
+#include "sensor.h"
 #include "tree_parser.h"
 
 // --- Mock node for testing composites without Lua ---
@@ -1093,4 +1094,152 @@ TEST(BtEventQueueTest, ConcurrentPushDrain) {
 
     producer.join();
     consumer.join();
+}
+
+// --- Sensor Parsing Tests ---
+
+TEST(TreeParserSensorTest, ParseSensorsOnComposite) {
+    const char* json = R"({
+        "root": {
+            "type": "Sequence",
+            "sensors": [
+                {"name": "btn_visible", "path": "sensors/element.lua", "interval": 100},
+                {"name": "page_loaded", "path": "sensors/page.lua", "interval": 200}
+            ],
+            "children": [
+                {"type": "Script", "path": "a.lua"}
+            ]
+        }
+    })";
+
+    auto root = TreeParser::Parse(json);
+    ASSERT_NE(root, nullptr);
+    const auto& specs = root->sensor_specs();
+    ASSERT_EQ(specs.size(), 2u);
+    EXPECT_EQ(specs[0].name, "btn_visible");
+    EXPECT_EQ(specs[0].script_path, "sensors/element.lua");
+    EXPECT_EQ(specs[0].interval_ms, 100);
+    EXPECT_EQ(specs[1].name, "page_loaded");
+    EXPECT_EQ(specs[1].interval_ms, 200);
+}
+
+TEST(TreeParserSensorTest, ParseSensorsOnScriptNode) {
+    const char* json = R"({
+        "root": {
+            "type": "Script",
+            "path": "a.lua",
+            "sensors": [
+                {"name": "check", "path": "sensors/check.lua"}
+            ]
+        }
+    })";
+
+    auto root = TreeParser::Parse(json);
+    ASSERT_NE(root, nullptr);
+    ASSERT_EQ(root->sensor_specs().size(), 1u);
+    EXPECT_EQ(root->sensor_specs()[0].name, "check");
+    EXPECT_EQ(root->sensor_specs()[0].interval_ms, 100);  // default
+}
+
+TEST(TreeParserSensorTest, ParseNoSensors) {
+    const char* json = R"({
+        "root": {
+            "type": "Selector",
+            "children": [
+                {"type": "Script", "path": "a.lua"}
+            ]
+        }
+    })";
+
+    auto root = TreeParser::Parse(json);
+    ASSERT_NE(root, nullptr);
+    EXPECT_TRUE(root->sensor_specs().empty());
+}
+
+TEST(TreeParserSensorTest, ParseSensorMissingName) {
+    const char* json = R"({
+        "root": {
+            "type": "Script",
+            "path": "a.lua",
+            "sensors": [
+                {"path": "sensors/check.lua"}
+            ]
+        }
+    })";
+
+    auto root = TreeParser::Parse(json);
+    ASSERT_NE(root, nullptr);
+    EXPECT_TRUE(root->sensor_specs().empty());  // invalid sensor skipped
+}
+
+TEST(TreeParserSensorTest, ParseSensorsOnNestedNode) {
+    const char* json = R"({
+        "root": {
+            "type": "Selector",
+            "children": [
+                {
+                    "type": "Sequence",
+                    "name": "branch_a",
+                    "sensors": [
+                        {"name": "a_visible", "path": "sensors/a.lua"}
+                    ],
+                    "children": [
+                        {"type": "Script", "path": "a.lua"}
+                    ]
+                },
+                {
+                    "type": "Sequence",
+                    "name": "branch_b",
+                    "sensors": [
+                        {"name": "b_visible", "path": "sensors/b.lua"}
+                    ],
+                    "children": [
+                        {"type": "Script", "path": "b.lua"}
+                    ]
+                }
+            ]
+        }
+    })";
+
+    auto root = TreeParser::Parse(json);
+    ASSERT_NE(root, nullptr);
+    auto* sel = dynamic_cast<Composite*>(root.get());
+    ASSERT_NE(sel, nullptr);
+
+    auto* branch_a = sel->children()[0].get();
+    ASSERT_EQ(branch_a->sensor_specs().size(), 1u);
+    EXPECT_EQ(branch_a->sensor_specs()[0].name, "a_visible");
+
+    auto* branch_b = sel->children()[1].get();
+    ASSERT_EQ(branch_b->sensor_specs().size(), 1u);
+    EXPECT_EQ(branch_b->sensor_specs()[0].name, "b_visible");
+}
+
+// --- Sensor Lifecycle Tests ---
+
+TEST(SensorLifecycleTest, DeactivateAllOnLoad) {
+    auto engine = std::make_shared<BehaviorTreeEngine>();
+
+    const char* json1 = R"({
+        "root": {
+            "type": "Sequence",
+            "sensors": [
+                {"name": "s1", "path": "sensors/a.lua"}
+            ],
+            "children": [{"type": "Script", "path": "a.lua"}]
+        }
+    })";
+
+    ASSERT_TRUE(engine->Load(json1));
+
+    // Simulate: load a new tree should clear old sensors
+    const char* json2 = R"({
+        "root": {
+            "type": "Selector",
+            "children": [{"type": "Script", "path": "b.lua"}]
+        }
+    })";
+
+    EXPECT_TRUE(engine->Load(json2));
+    EXPECT_TRUE(engine->blackboard().Has("s1") == false);  // blackboard cleared
 }

@@ -18,4 +18,5 @@ private:
     static std::unique_ptr<Node> ParseComposite(const nlohmann::json& j, uint32_t& next_id);
     static std::unique_ptr<Node> ParseScriptLeaf(const nlohmann::json& j, uint32_t& next_id);
     static void ApplyDecorators(const nlohmann::json& j, Node* node);
+    static void ApplySensors(const nlohmann::json& j, Node* node);
 };

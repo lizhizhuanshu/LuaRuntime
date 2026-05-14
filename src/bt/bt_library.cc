@@ -222,6 +222,10 @@ void BehaviorTreeLibrary::StartBtThread(std::shared_ptr<CodeProvider> code_provi
     // Initialize script nodes using BT's LuaContext
     engine_->InitScriptNodes(bt_lua_->lua_state(), bt_context_.get());
 
+    // Initialize sensors and activate initial set
+    engine_->InitSensors(bt_lua_->lua_state(), bt_context_.get());
+    engine_->ActivateInitialSensors();
+
     // Store completion callback and start engine
     on_complete_ = std::move(on_complete);
     run_completed_.store(false);
@@ -234,6 +238,7 @@ void BehaviorTreeLibrary::StartBtThread(std::shared_ptr<CodeProvider> code_provi
 
 void BehaviorTreeLibrary::StopBtThread(bool resume_pending) {
     bt_running_.store(false);
+    engine_->DeactivateAllSensors();
     if (bt_context_) {
         bt_context_->cv().notify_all();
     }

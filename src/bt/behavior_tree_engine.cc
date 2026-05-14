@@ -1,12 +1,19 @@
 #include "behavior_tree_engine.h"
 
 #include <algorithm>
+#include <chrono>
 
 #include <spdlog/spdlog.h>
 
 #include "composite.h"
 #include "script_node.h"
 #include "tree_parser.h"
+
+int64_t BehaviorTreeEngine::NowMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
 
 BehaviorTreeEngine::BehaviorTreeEngine() = default;
 
@@ -15,6 +22,7 @@ BehaviorTreeEngine::~BehaviorTreeEngine() {
 }
 
 bool BehaviorTreeEngine::Load(const std::string& json) {
+    DeactivateAllSensors();
     auto tree = TreeParser::Parse(json);
     if (!tree) {
         spdlog::error("BehaviorTreeEngine: failed to parse JSON");
@@ -99,14 +107,17 @@ NodeStatus BehaviorTreeEngine::TickOnce() {
     if (!root_ || !running_.load() || paused_.load()) return NodeStatus::kRunning;
 
     HandleEvents();
+    TickSensors();
 
     if (!EvaluateDecorators(root_.get())) {
         return NodeStatus::kRunning;
     }
 
     auto status = root_->Tick(blackboard_, event_queue_);
+    UpdateActiveSensors();
 
     if (status != NodeStatus::kRunning) {
+        DeactivateAllSensors();
         ResetTree();
     }
     return status;
@@ -217,4 +228,119 @@ bool BehaviorTreeEngine::IsDescendantOf(Node* node, Node* ancestor) const {
         node = node->parent();
     }
     return false;
+}
+
+// --- Sensor management ---
+
+void BehaviorTreeEngine::InitSensors(lua_State* L, LuaContext* ctx) {
+    if (!root_) return;
+    InitSensorsRecursive(root_.get(), L, ctx);
+}
+
+void BehaviorTreeEngine::InitSensorsRecursive(Node* node, lua_State* L, LuaContext* ctx) {
+    for (auto& spec : node->sensor_specs()) {
+        if (active_sensors_.count(spec.name)) {
+            spdlog::warn("BehaviorTreeEngine: duplicate sensor name '{}', overwriting", spec.name);
+        }
+        auto sensor = std::make_unique<ActiveSensor>(spec);
+        sensor->Init(L, ctx);
+        active_sensors_[spec.name] = std::move(sensor);
+    }
+    if (auto* composite = dynamic_cast<Composite*>(node)) {
+        for (auto& child : composite->children()) {
+            InitSensorsRecursive(child.get(), L, ctx);
+        }
+    }
+}
+
+void BehaviorTreeEngine::ActivateInitialSensors() {
+    if (!root_) return;
+    std::set<Node*> active_nodes;
+    CollectActiveNodes(root_.get(), active_nodes);
+    for (auto* node : active_nodes) {
+        ActivateNodeSensors(node);
+    }
+    prev_sensor_nodes_ = std::move(active_nodes);
+}
+
+void BehaviorTreeEngine::TickSensors() {
+    int64_t now = NowMs();
+    for (auto& [name, sensor] : active_sensors_) {
+        if (sensor->TickReady(now)) {
+            sensor->RunOnce(blackboard_);
+            sensor->ScheduleNext(now);
+        }
+    }
+}
+
+void BehaviorTreeEngine::UpdateActiveSensors() {
+    if (!root_) return;
+
+    std::set<Node*> active_nodes;
+    CollectActiveNodes(root_.get(), active_nodes);
+
+    // Activate sensors for newly active nodes
+    for (auto* node : active_nodes) {
+        if (!prev_sensor_nodes_.count(node)) {
+            ActivateNodeSensors(node);
+        }
+    }
+
+    // Deactivate sensors for no-longer-active nodes
+    // (only if no other active node still needs the same sensor)
+    for (auto* node : prev_sensor_nodes_) {
+        if (!active_nodes.count(node)) {
+            DeactivateNodeSensors(node, active_nodes);
+        }
+    }
+
+    prev_sensor_nodes_ = std::move(active_nodes);
+}
+
+void BehaviorTreeEngine::CollectActiveNodes(Node* node, std::set<Node*>& out) {
+    out.insert(node);
+    auto* composite = dynamic_cast<Composite*>(node);
+    if (composite && composite->current_child_index() < composite->children().size()) {
+        CollectActiveNodes(composite->children()[composite->current_child_index()].get(), out);
+    }
+}
+
+void BehaviorTreeEngine::ActivateNodeSensors(Node* node) {
+    for (auto& spec : node->sensor_specs()) {
+        auto it = active_sensors_.find(spec.name);
+        if (it != active_sensors_.end() && !it->second->is_active()) {
+            it->second->Activate(blackboard_);
+        }
+    }
+}
+
+void BehaviorTreeEngine::DeactivateNodeSensors(Node* node, const std::set<Node*>& still_active) {
+    for (auto& spec : node->sensor_specs()) {
+        // Check if any still-active node also declares this sensor
+        bool still_needed = false;
+        for (auto* other : still_active) {
+            if (other == node) continue;
+            for (auto& other_spec : other->sensor_specs()) {
+                if (other_spec.name == spec.name) {
+                    still_needed = true;
+                    break;
+                }
+            }
+            if (still_needed) break;
+        }
+
+        if (still_needed) continue;
+
+        auto it = active_sensors_.find(spec.name);
+        if (it != active_sensors_.end() && it->second->is_active()) {
+            it->second->Deactivate(&blackboard_);
+        }
+    }
+}
+
+void BehaviorTreeEngine::DeactivateAllSensors() {
+    for (auto& [name, sensor] : active_sensors_) {
+        sensor->Deactivate(&blackboard_);
+    }
+    prev_sensor_nodes_.clear();
 }

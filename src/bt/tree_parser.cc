@@ -117,6 +117,7 @@ std::unique_ptr<Node> TreeParser::ParseComposite(const nlohmann::json& j, uint32
     }
 
     ApplyDecorators(j, node.get());
+    ApplySensors(j, node.get());
     return node;
 }
 
@@ -132,6 +133,7 @@ std::unique_ptr<Node> TreeParser::ParseScriptLeaf(const nlohmann::json& j, uint3
 
     auto node = std::make_unique<ScriptNode>(id, std::move(name), std::move(path));
     ApplyDecorators(j, node.get());
+    ApplySensors(j, node.get());
     return node;
 }
 
@@ -167,5 +169,23 @@ void TreeParser::ApplyDecorators(const nlohmann::json& j, Node* node) {
         } else {
             spdlog::warn("TreeParser: unknown decorator type '{}'", dec_type);
         }
+    }
+}
+
+void TreeParser::ApplySensors(const nlohmann::json& j, Node* node) {
+    if (!j.contains("sensors") || !j["sensors"].is_array()) return;
+
+    for (const auto& sen_j : j["sensors"]) {
+        if (!sen_j.contains("name") || !sen_j.contains("path")) {
+            spdlog::error("TreeParser: sensor missing 'name' or 'path'");
+            continue;
+        }
+
+        SensorSpec spec;
+        spec.name = sen_j["name"].get<std::string>();
+        spec.script_path = sen_j["path"].get<std::string>();
+        spec.interval_ms = sen_j.value("interval", 100);
+
+        node->AddSensorSpec(std::move(spec));
     }
 }

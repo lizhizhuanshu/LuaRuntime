@@ -1,7 +1,9 @@
 #pragma once
 
 #include <atomic>
+#include <map>
 #include <memory>
+#include <set>
 #include <string>
 
 extern "C" {
@@ -11,6 +13,7 @@ extern "C" {
 #include "blackboard.h"
 #include "bt_event_queue.h"
 #include "node.h"
+#include "sensor.h"
 #include "types.h"
 
 class BehaviorTreeEngine : public std::enable_shared_from_this<BehaviorTreeEngine> {
@@ -48,6 +51,15 @@ public:
     // Initialize script nodes with lua_State and LuaContext (called on event loop thread)
     void InitScriptNodes(lua_State* L, LuaContext* ctx);
 
+    // Initialize sensors with lua_State and LuaContext (called on BT thread)
+    void InitSensors(lua_State* L, LuaContext* ctx);
+
+    // Activate sensors for the initial active path (root → first child → ...)
+    void ActivateInitialSensors();
+
+    // Deactivate all active sensors
+    void DeactivateAllSensors();
+
     // Tick once (called by BT event loop thread)
     // Returns the tree status after tick (kRunning if tree is still executing)
     NodeStatus TickOnce();
@@ -61,6 +73,16 @@ private:
     void CollectRunningNodes(Node* node, std::vector<Node*>& out);
     bool IsDescendantOf(Node* node, Node* ancestor) const;
 
+    // Sensor management
+    void TickSensors();
+    void UpdateActiveSensors();
+    void CollectActiveNodes(Node* node, std::set<Node*>& out);
+    void ActivateNodeSensors(Node* node);
+    void DeactivateNodeSensors(Node* node, const std::set<Node*>& still_active);
+    void InitSensorsRecursive(Node* node, lua_State* L, LuaContext* ctx);
+
+    static int64_t NowMs();
+
     std::unique_ptr<Node> root_;
     Blackboard blackboard_;
     BtEventQueue event_queue_;
@@ -70,4 +92,9 @@ private:
 
     mutable std::mutex current_node_mutex_;
     std::string current_node_path_;
+
+    // Active sensors (keyed by sensor name)
+    std::map<std::string, std::unique_ptr<ActiveSensor>> active_sensors_;
+    // Nodes that had sensors activated last tick
+    std::set<Node*> prev_sensor_nodes_;
 };
