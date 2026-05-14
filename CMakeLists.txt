@@ -78,11 +78,11 @@ FetchContent_MakeAvailable(cinatra)
 # ── LuaRuntime library ─────────────────────────────────────────────────────
 
 add_library(lua_runtime_lib STATIC
-    src/lua_context.cc
-    src/lua_runtime.cc
-    src/http_library.cc
+    src/lua/lua_context.cc
+    src/lua/lua_runtime.cc
+    src/lua/http_library.cc
 )
-target_include_directories(lua_runtime_lib PUBLIC src)
+target_include_directories(lua_runtime_lib PUBLIC src/lua)
 cinatra_use_third_party_headers(lua_runtime_lib)
 target_include_directories(lua_runtime_lib SYSTEM PRIVATE ${cinatra_SOURCE_DIR}/include)
 target_compile_definitions(lua_runtime_lib PUBLIC CINATRA_ENABLE_SSL)
@@ -113,6 +113,7 @@ FetchContent_MakeAvailable(googletest)
 file(GLOB TEST_SOURCES tests/*.cc)
 add_executable(lua_runtime_test ${TEST_SOURCES})
 target_link_libraries(lua_runtime_test PRIVATE lua_runtime_lib GTest::gtest_main)
+target_include_directories(lua_runtime_test PRIVATE ${CMAKE_SOURCE_DIR}/src/lua)
 target_include_directories(lua_runtime_test SYSTEM PRIVATE ${cinatra_SOURCE_DIR}/include)
 include(GoogleTest)
 gtest_discover_tests(lua_runtime_test)
