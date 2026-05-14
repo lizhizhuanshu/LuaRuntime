@@ -3,6 +3,8 @@
 #include <async_simple/coro/Lazy.h>
 #include <async_simple/coro/SyncAwait.h>
 
+#include <filesystem>
+#include <fstream>
 #include <thread>
 
 #include "behavior_tree_engine.h"
@@ -850,7 +852,7 @@ TEST_F(BehaviorTreeLibraryTest, GetStatusInitially) {
 TEST_F(BehaviorTreeLibraryTest, RunInvalidJson) {
     auto r = AWAIT_BT(rt->RunScript(R"(
         local bt = require('bt')
-        local ok, err = bt.run('invalid')
+        local ok, err = bt.run('{invalid}')
         return ok, err or 'nil'
     )"));
     ASSERT_EQ(r.status, LUA_OK);
@@ -1483,4 +1485,124 @@ TEST(SubtreeTest, IndirectCircularReference) {
 
     auto root = TreeParser::Parse(json);
     EXPECT_EQ(root, nullptr);
+}
+
+// --- LoadTreeFromDirectory Tests ---
+
+class LoadTreeFromDirectoryTest : public ::testing::Test {
+protected:
+    void SetUp() override {
+        dir_ = std::filesystem::temp_directory_path() / "bt_test_tree";
+        std::filesystem::create_directories(dir_);
+    }
+
+    void TearDown() override {
+        std::filesystem::remove_all(dir_);
+    }
+
+    void WriteFile(const std::string& name, const std::string& content) {
+        std::ofstream(dir_ / name) << content;
+    }
+
+    std::filesystem::path dir_;
+};
+
+TEST_F(LoadTreeFromDirectoryTest, LoadsRootOnly) {
+    WriteFile("root.json", R"({"type": "Selector", "children": [
+        {"type": "Script", "path": "a.lua"}
+    ]})");
+
+    auto json = TreeParser::LoadTreeFromDirectory(dir_.string());
+    ASSERT_FALSE(json.empty());
+
+    auto root = TreeParser::Parse(json);
+    ASSERT_NE(root, nullptr);
+    EXPECT_EQ(root->type(), "Selector");
+}
+
+TEST_F(LoadTreeFromDirectoryTest, LoadsRootWithSubtrees) {
+    WriteFile("root.json", R"({"type": "Selector", "children": [
+        {"type": "Subtree", "subtree": "combat"},
+        {"type": "Script", "path": "idle.lua"}
+    ]})");
+    WriteFile("combat.json", R"({"type": "Sequence", "children": [
+        {"type": "Script", "path": "aim.lua"},
+        {"type": "Script", "path": "attack.lua"}
+    ]})");
+
+    auto json = TreeParser::LoadTreeFromDirectory(dir_.string());
+    ASSERT_FALSE(json.empty());
+
+    auto root = TreeParser::Parse(json);
+    ASSERT_NE(root, nullptr);
+    auto* sel = dynamic_cast<Composite*>(root.get());
+    ASSERT_NE(sel, nullptr);
+    EXPECT_EQ(sel->children().size(), 2u);
+
+    auto* sub = dynamic_cast<SubtreeNode*>(sel->children()[0].get());
+    ASSERT_NE(sub, nullptr);
+    EXPECT_EQ(sub->subtree_name(), "combat");
+    auto* inner = dynamic_cast<Composite*>(sub->subtree_root());
+    ASSERT_NE(inner, nullptr);
+    EXPECT_EQ(inner->children().size(), 2u);
+}
+
+TEST_F(LoadTreeFromDirectoryTest, MultipleSubtrees) {
+    WriteFile("root.json", R"({"type": "Sequence", "children": [
+        {"type": "Subtree", "subtree": "combat"},
+        {"type": "Subtree", "subtree": "patrol"}
+    ]})");
+    WriteFile("combat.json", R"({"type": "Script", "path": "fight.lua"})");
+    WriteFile("patrol.json", R"({"type": "Script", "path": "walk.lua"})");
+
+    auto json = TreeParser::LoadTreeFromDirectory(dir_.string());
+    ASSERT_FALSE(json.empty());
+
+    auto root = TreeParser::Parse(json);
+    ASSERT_NE(root, nullptr);
+    auto* seq = dynamic_cast<Composite*>(root.get());
+    ASSERT_NE(seq, nullptr);
+    EXPECT_EQ(seq->children().size(), 2u);
+    EXPECT_EQ(seq->children()[0]->type(), "Subtree");
+    EXPECT_EQ(seq->children()[1]->type(), "Subtree");
+}
+
+TEST_F(LoadTreeFromDirectoryTest, IgnoresNonJsonFiles) {
+    WriteFile("root.json", R"({"type": "Script", "path": "a.lua"})");
+    WriteFile("notes.txt", "ignore me");
+    WriteFile("data.csv", "1,2,3");
+
+    auto json = TreeParser::LoadTreeFromDirectory(dir_.string());
+    ASSERT_FALSE(json.empty());
+
+    auto root = TreeParser::Parse(json);
+    ASSERT_NE(root, nullptr);
+    EXPECT_EQ(root->type(), "Script");
+}
+
+TEST_F(LoadTreeFromDirectoryTest, DirNotFound) {
+    auto json = TreeParser::LoadTreeFromDirectory("/nonexistent/path");
+    EXPECT_TRUE(json.empty());
+}
+
+TEST_F(LoadTreeFromDirectoryTest, NoRootJson) {
+    WriteFile("combat.json", R"({"type": "Script", "path": "fight.lua"})");
+
+    auto json = TreeParser::LoadTreeFromDirectory(dir_.string());
+    EXPECT_TRUE(json.empty());
+}
+
+TEST_F(LoadTreeFromDirectoryTest, InvalidJsonInRoot) {
+    WriteFile("root.json", "{invalid}");
+
+    auto json = TreeParser::LoadTreeFromDirectory(dir_.string());
+    EXPECT_TRUE(json.empty());
+}
+
+TEST_F(LoadTreeFromDirectoryTest, InvalidJsonInSubtree) {
+    WriteFile("root.json", R"({"type": "Subtree", "subtree": "bad"})");
+    WriteFile("bad.json", "{broken");
+
+    auto json = TreeParser::LoadTreeFromDirectory(dir_.string());
+    EXPECT_TRUE(json.empty());
 }

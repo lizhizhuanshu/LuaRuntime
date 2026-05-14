@@ -12,6 +12,7 @@ extern "C" {
 
 #include "blackboard.h"
 #include "lua_context.h"
+#include "tree_parser.h"
 #include "types.h"
 
 namespace {
@@ -53,14 +54,28 @@ BehaviorTreeLibrary* GetLibrary(lua_State* L) {
     return static_cast<BehaviorTreeLibrary*>(lua_touserdata(L, lua_upvalueindex(2)));
 }
 
-// bt.run(json_string) — yields coroutine, resumes when BT tree completes
+// bt.run(json_or_path) — yields coroutine, resumes when BT tree completes
+// Accepts either a JSON string or a directory path containing root.json + subtree files
 int bt_run(lua_State* L) {
     auto* engine = GetEngine(L);
     auto* lib = GetLibrary(L);
-    const char* json_str = luaL_checkstring(L, 1);
+    const char* input = luaL_checkstring(L, 1);
 
     // Stop any previous run (resume its coroutine first)
     lib->StopBtThread(true);
+
+    // Detect JSON vs directory path
+    std::string json_str;
+    if (input[0] == '{' || input[0] == '[') {
+        json_str = input;
+    } else {
+        json_str = TreeParser::LoadTreeFromDirectory(input);
+        if (json_str.empty()) {
+            lua_pushboolean(L, 0);
+            lua_pushstring(L, "failed to load tree from directory");
+            return 2;
+        }
+    }
 
     if (!engine->Load(json_str)) {
         lua_pushboolean(L, 0);

@@ -16,6 +16,10 @@ class TreeParser {
 public:
     static std::unique_ptr<Node> Parse(const std::string& json_str);
 
+    // Load tree from a directory: root.json + other .json files as subtrees
+    // Returns combined JSON string, or empty string on error
+    static std::string LoadTreeFromDirectory(const std::string& dir_path);
+
 private:
     static std::unique_ptr<Node> ParseNode(const nlohmann::json& j, uint32_t& next_id,
                                            const SubtreeRegistry& subtrees,

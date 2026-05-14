@@ -1,5 +1,7 @@
 #include "tree_parser.h"
 
+#include <filesystem>
+#include <fstream>
 #include <optional>
 #include <string>
 
@@ -42,6 +44,68 @@ Parallel::Policy ParseParallelPolicy(const std::string& s) {
     return Parallel::Policy::kRequireAll;
 }
 }  // namespace
+
+std::string TreeParser::LoadTreeFromDirectory(const std::string& dir_path) {
+    namespace fs = std::filesystem;
+
+    fs::path dir(dir_path);
+    if (!fs::is_directory(dir)) {
+        spdlog::error("TreeParser: '{}' is not a directory", dir_path);
+        return {};
+    }
+
+    // Read root.json
+    auto root_file = dir / "root.json";
+    if (!fs::exists(root_file)) {
+        spdlog::error("TreeParser: '{}' not found", root_file.string());
+        return {};
+    }
+
+    std::ifstream rf(root_file);
+    if (!rf.is_open()) {
+        spdlog::error("TreeParser: failed to open '{}'", root_file.string());
+        return {};
+    }
+
+    nlohmann::json root_j;
+    try {
+        rf >> root_j;
+    } catch (const nlohmann::json::parse_error& e) {
+        spdlog::error("TreeParser: failed to parse '{}': {}", root_file.string(), e.what());
+        return {};
+    }
+
+    // Scan for subtree .json files (excluding root.json)
+    nlohmann::json subtrees_j = nlohmann::json::object();
+    for (const auto& entry : fs::directory_iterator(dir)) {
+        if (!entry.is_regular_file()) continue;
+        auto path = entry.path();
+        if (path.extension() != ".json") continue;
+        if (path.filename() == "root.json") continue;
+
+        auto name = path.stem().string();
+        std::ifstream sf(path);
+        if (!sf.is_open()) {
+            spdlog::error("TreeParser: failed to open '{}'", path.string());
+            return {};
+        }
+
+        try {
+            sf >> subtrees_j[name];
+        } catch (const nlohmann::json::parse_error& e) {
+            spdlog::error("TreeParser: failed to parse '{}': {}", path.string(), e.what());
+            return {};
+        }
+    }
+
+    // Combine into {"root": ..., "subtrees": {...}}
+    nlohmann::json combined;
+    combined["root"] = std::move(root_j);
+    if (!subtrees_j.empty()) {
+        combined["subtrees"] = std::move(subtrees_j);
+    }
+    return combined.dump();
+}
 
 std::unique_ptr<Node> TreeParser::Parse(const std::string& json_str) {
     try {
