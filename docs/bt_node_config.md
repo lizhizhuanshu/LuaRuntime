@@ -2,10 +2,13 @@
 
 ## 顶层结构
 
-JSON 必须包含 `"root"` 字段，所有节点必须包含 `"type"` 字段。
+JSON 必须包含 `"root"` 字段，所有节点必须包含 `"type"` 字段。可选的 `"subtrees"` 字段定义可复用的子树。
 
 ```json
 {
+  "subtrees": {
+    "子树名": { "type": "...", "children": [...] }
+  },
   "root": {
     "type": "节点类型",
     "name": "可选名称",
@@ -99,6 +102,36 @@ JSON 必须包含 `"root"` 字段，所有节点必须包含 `"type"` 字段。
 
 Script 节点支持 Lua 协程（yield），可在脚本内使用 `coroutine.yield()` 等待。
 
+### Subtree - 子树节点
+
+引用 `"subtrees"` 中定义的子树。子树可复用、可嵌套。
+
+```json
+{
+  "subtrees": {
+    "combat": {
+      "type": "Sequence",
+      "children": [
+        {"type": "Script", "path": "aim.lua"},
+        {"type": "Script", "path": "attack.lua"}
+      ]
+    }
+  },
+  "root": {
+    "type": "Subtree",
+    "subtree": "combat",
+    "name": "可选名称"
+  }
+}
+```
+
+| 字段 | 必填 | 说明 |
+|------|------|------|
+| `subtree` | **是** | `"subtrees"` 中定义的子树名称 |
+| `name` | 否 | 节点名称，默认等于 subtree 名 |
+
+Subtree 节点支持 `decorators` 和 `sensors`，与普通节点一致。子树定义内也可以引用其他子树（支持嵌套）。
+
 ---
 
 ## 3. 装饰器 (Decorators)
@@ -185,7 +218,121 @@ Script 节点支持 Lua 协程（yield），可在脚本内使用 `coroutine.yie
 
 ---
 
-## 4. 完整示例
+## 4. 传感器 (Sensors)
+
+传感器是按需运行的异步感知模块，声明在节点上。当节点处于活跃执行路径时，传感器自动激活并周期性执行；节点离开活跃路径时自动停用。
+
+### 何时使用传感器
+
+当条件判断依赖异步数据（如 DOM 查询、网络请求）时，用传感器定期将结果写入黑板，`BlackboardCondition` 装饰器同步读取黑板缓存值。
+
+### JSON 配置
+
+在任意节点（复合节点或叶子节点）上通过 `"sensors"` 数组声明：
+
+```json
+{
+  "type": "Sequence",
+  "sensors": [
+    {"name": "login_btn", "path": "sensors/element_visible.lua", "interval": 100}
+  ],
+  "children": [...]
+}
+```
+
+| 字段 | 必填 | 类型 | 说明 |
+|------|------|------|------|
+| `name` | **是** | string | 传感器名称，同时作为黑板键名（Tick 返回值写入 `bb[name]`） |
+| `path` | **是** | string | Lua 脚本路径 |
+| `interval` | **是** | integer | Tick 间隔（毫秒） |
+
+### 传感器脚本格式
+
+脚本 `return` 一个 **table** 或 **function**：
+
+#### Table 格式（推荐）
+
+```lua
+-- sensors/element_visible.lua
+return {
+    Enter = function(bb)
+        -- 节点进入活跃路径时调用（同步，不可 yield）
+        print("sensor activated")
+    end,
+
+    Tick = function(bb)
+        -- 周期性调用（协程，可 yield）
+        local found = coroutine.yield(async_query("#login-btn"))
+        return found ~= nil  -- 返回值 → 黑板[传感器名]
+    end,
+
+    Exit = function(bb)
+        -- 节点离开活跃路径时调用（同步，不可 yield）
+        print("sensor deactivated")
+    end
+}
+```
+
+| 回调 | 参数 | 可否 yield | 说明 |
+|------|------|-----------|------|
+| `Enter` | `bb` (table) | 否 | 激活时调用一次 |
+| `Tick` | `bb` (table) | **是** | 按 interval 周期调用，返回值写入黑板 |
+| `Exit` | `bb` (table) | 否 | 停用时调用一次 |
+
+`Enter` 和 `Exit` 是可选的，`Tick` 是必需的。
+
+#### Function 格式（简化）
+
+```lua
+-- sensors/check_hp.lua
+return function(bb)
+    return bb.hp and bb.hp > 0
+end
+```
+
+返回单个函数时，等同于只有 `Tick`。
+
+### 传感器与装饰器配合
+
+传感器写入黑板，`BlackboardCondition` 读取黑板：
+
+```json
+{
+  "type": "Selector",
+  "children": [
+    {
+      "type": "Script",
+      "path": "scripts/click_login.lua",
+      "sensors": [
+        {"name": "login_visible", "path": "sensors/element_visible.lua", "interval": 100}
+      ],
+      "decorators": [
+        {
+          "type": "BlackboardCondition",
+          "key": "login_visible",
+          "operator": "is_set",
+          "abort": "Self"
+        }
+      ]
+    }
+  ]
+}
+```
+
+工作流程：
+1. 传感器 `login_visible` 每 100ms 查询 DOM，结果写入 `bb.login_visible`
+2. `BlackboardCondition` 每次 tick 前同步检查 `bb.login_visible`
+3. 条件满足 → 执行脚本；条件不满足 → 中止执行
+
+### 生命周期
+
+- **激活**：节点进入活跃路径（root → 当前 child → ... → 当前 leaf）时，其声明的传感器被激活
+- **Tick**：按 `interval` 间隔执行 Tick 函数，支持协程 yield
+- **停用**：节点离开活跃路径时，其传感器被停用（如果无其他活跃节点共享同一传感器）
+
+---
+
+## 5. 完整示例
 
 ```json
 {
@@ -238,7 +385,7 @@ Script 节点支持 Lua 协程（yield），可在脚本内使用 `coroutine.yie
 
 ---
 
-## 5. 节点类型汇总
+## 6. 节点类型汇总
 
 | 类型 | 分类 | 必填字段 | 子节点 | 说明 |
 |------|------|---------|--------|------|
@@ -246,6 +393,7 @@ Script 节点支持 Lua 协程（yield），可在脚本内使用 `coroutine.yie
 | `Sequence` | 复合 | `type` | `children` | AND 逻辑，全部成功才成功 |
 | `Parallel` | 复合 | `type` | `children` | 并行执行，策略控制结果 |
 | `Script` | 叶子 | `type`, `path` | 无 | 执行 Lua 脚本 |
+| `Subtree` | 叶子 | `type`, `subtree` | 无 | 引用 subtrees 中定义的子树 |
 | `BlackboardCondition` | 装饰器 | `type`, `key` | N/A | 黑板条件判断 |
 | `Inverter` | 装饰器 | `type` | N/A | 反转结果 |
 | `ForceSuccess` | 装饰器 | `type` | N/A | 强制成功 |

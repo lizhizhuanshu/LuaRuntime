@@ -17,6 +17,7 @@
 #include "script_node.h"
 #include "selector.h"
 #include "sequence.h"
+#include "subtree_node.h"
 
 namespace {
 AbortMode ParseAbortMode(const std::string& s) {
@@ -49,8 +50,18 @@ std::unique_ptr<Node> TreeParser::Parse(const std::string& json_str) {
             spdlog::error("TreeParser: JSON must have 'root' field");
             return nullptr;
         }
+
+        // Parse top-level "subtrees" definitions
+        SubtreeRegistry subtrees;
+        if (j.contains("subtrees") && j["subtrees"].is_object()) {
+            for (auto it = j["subtrees"].begin(); it != j["subtrees"].end(); ++it) {
+                subtrees[it.key()] = it.value();
+            }
+        }
+
         uint32_t next_id = 1;
-        return ParseNode(j["root"], next_id);
+        std::set<std::string> resolving;
+        return ParseNode(j["root"], next_id, subtrees, resolving);
     } catch (const nlohmann::json::parse_error& e) {
         spdlog::error("TreeParser: JSON parse error: {}", e.what());
         return nullptr;
@@ -60,7 +71,9 @@ std::unique_ptr<Node> TreeParser::Parse(const std::string& json_str) {
     }
 }
 
-std::unique_ptr<Node> TreeParser::ParseNode(const nlohmann::json& j, uint32_t& next_id) {
+std::unique_ptr<Node> TreeParser::ParseNode(const nlohmann::json& j, uint32_t& next_id,
+                                            const SubtreeRegistry& subtrees,
+                                            std::set<std::string>& resolving) {
     if (!j.contains("type")) {
         spdlog::error("TreeParser: node missing 'type' field");
         return nullptr;
@@ -70,21 +83,26 @@ std::unique_ptr<Node> TreeParser::ParseNode(const nlohmann::json& j, uint32_t& n
     std::string name = j.value("name", type);
 
     if (type == "Selector" || type == "Sequence" || type == "Parallel") {
-        return ParseComposite(j, next_id);
+        return ParseComposite(j, next_id, subtrees, resolving);
     }
     if (type == "Script") {
         return ParseScriptLeaf(j, next_id);
+    }
+    if (type == "Subtree") {
+        return ParseSubtree(j, next_id, subtrees, resolving);
     }
 
     spdlog::error("TreeParser: unknown node type '{}'", type);
     return nullptr;
 }
 
-std::vector<std::unique_ptr<Node>> TreeParser::ParseChildren(const nlohmann::json& j, uint32_t& next_id) {
+std::vector<std::unique_ptr<Node>> TreeParser::ParseChildren(const nlohmann::json& j, uint32_t& next_id,
+                                                             const SubtreeRegistry& subtrees,
+                                                             std::set<std::string>& resolving) {
     std::vector<std::unique_ptr<Node>> children;
     if (j.contains("children") && j["children"].is_array()) {
         for (const auto& child_j : j["children"]) {
-            auto child = ParseNode(child_j, next_id);
+            auto child = ParseNode(child_j, next_id, subtrees, resolving);
             if (child) {
                 children.push_back(std::move(child));
             }
@@ -93,7 +111,9 @@ std::vector<std::unique_ptr<Node>> TreeParser::ParseChildren(const nlohmann::jso
     return children;
 }
 
-std::unique_ptr<Node> TreeParser::ParseComposite(const nlohmann::json& j, uint32_t& next_id) {
+std::unique_ptr<Node> TreeParser::ParseComposite(const nlohmann::json& j, uint32_t& next_id,
+                                                 const SubtreeRegistry& subtrees,
+                                                 std::set<std::string>& resolving) {
     std::string type = j["type"].get<std::string>();
     std::string name = j.value("name", type);
     uint32_t id = next_id++;
@@ -112,7 +132,7 @@ std::unique_ptr<Node> TreeParser::ParseComposite(const nlohmann::json& j, uint32
     }
 
     auto* composite = static_cast<Composite*>(node.get());
-    for (auto& child : ParseChildren(j, next_id)) {
+    for (auto& child : ParseChildren(j, next_id, subtrees, resolving)) {
         composite->AddChild(std::move(child));
     }
 
@@ -132,6 +152,47 @@ std::unique_ptr<Node> TreeParser::ParseScriptLeaf(const nlohmann::json& j, uint3
     uint32_t id = next_id++;
 
     auto node = std::make_unique<ScriptNode>(id, std::move(name), std::move(path));
+    ApplyDecorators(j, node.get());
+    ApplySensors(j, node.get());
+    return node;
+}
+
+std::unique_ptr<Node> TreeParser::ParseSubtree(const nlohmann::json& j, uint32_t& next_id,
+                                               const SubtreeRegistry& subtrees,
+                                               std::set<std::string>& resolving) {
+    if (!j.contains("subtree")) {
+        spdlog::error("TreeParser: Subtree node missing 'subtree' field");
+        return nullptr;
+    }
+
+    auto subtree_name = j["subtree"].get<std::string>();
+
+    // Cycle detection
+    if (resolving.count(subtree_name)) {
+        spdlog::error("TreeParser: circular subtree reference '{}'", subtree_name);
+        return nullptr;
+    }
+
+    auto it = subtrees.find(subtree_name);
+    if (it == subtrees.end()) {
+        spdlog::error("TreeParser: unknown subtree '{}'", subtree_name);
+        return nullptr;
+    }
+
+    // Reserve an ID for the SubtreeNode wrapper
+    uint32_t subtree_id = next_id++;
+    resolving.insert(subtree_name);
+    auto subtree_root = ParseNode(it->second, next_id, subtrees, resolving);
+    resolving.erase(subtree_name);
+    if (!subtree_root) {
+        spdlog::error("TreeParser: failed to parse subtree '{}'", subtree_name);
+        return nullptr;
+    }
+
+    auto name = j.value("name", subtree_name);
+    auto node = std::make_unique<SubtreeNode>(subtree_id, std::move(name),
+                                               std::move(subtree_name),
+                                               std::move(subtree_root));
     ApplyDecorators(j, node.get());
     ApplySensors(j, node.get());
     return node;

@@ -21,6 +21,7 @@
 #include "selector.h"
 #include "sequence.h"
 #include "sensor.h"
+#include "subtree_node.h"
 #include "tree_parser.h"
 
 // --- Mock node for testing composites without Lua ---
@@ -1242,4 +1243,244 @@ TEST(SensorLifecycleTest, DeactivateAllOnLoad) {
 
     EXPECT_TRUE(engine->Load(json2));
     EXPECT_TRUE(engine->blackboard().Has("s1") == false);  // blackboard cleared
+}
+
+// --- Subtree Tests ---
+
+TEST(SubtreeTest, ParseSubtree) {
+    const char* json = R"({
+        "subtrees": {
+            "combat": {
+                "type": "Sequence",
+                "children": [
+                    {"type": "Script", "path": "aim.lua"},
+                    {"type": "Script", "path": "attack.lua"}
+                ]
+            }
+        },
+        "root": {
+            "type": "Subtree",
+            "subtree": "combat"
+        }
+    })";
+
+    auto root = TreeParser::Parse(json);
+    ASSERT_NE(root, nullptr);
+    EXPECT_EQ(root->type(), "Subtree");
+    auto* sub = dynamic_cast<SubtreeNode*>(root.get());
+    ASSERT_NE(sub, nullptr);
+    EXPECT_EQ(sub->subtree_name(), "combat");
+    EXPECT_NE(sub->subtree_root(), nullptr);
+
+    auto* inner = dynamic_cast<Composite*>(sub->subtree_root());
+    ASSERT_NE(inner, nullptr);
+    EXPECT_EQ(inner->children().size(), 2u);
+}
+
+TEST(SubtreeTest, ParseSubtreeMissingName) {
+    const char* json = R"({
+        "root": {"type": "Subtree"}
+    })";
+
+    auto root = TreeParser::Parse(json);
+    EXPECT_EQ(root, nullptr);
+}
+
+TEST(SubtreeTest, ParseSubtreeUnknownName) {
+    const char* json = R"({
+        "root": {"type": "Subtree", "subtree": "nonexistent"}
+    })";
+
+    auto root = TreeParser::Parse(json);
+    EXPECT_EQ(root, nullptr);
+}
+
+TEST(SubtreeTest, ParseNestedSubtree) {
+    const char* json = R"({
+        "subtrees": {
+            "inner": {
+                "type": "Script",
+                "path": "inner.lua"
+            },
+            "outer": {
+                "type": "Sequence",
+                "children": [
+                    {"type": "Subtree", "subtree": "inner"},
+                    {"type": "Script", "path": "outer.lua"}
+                ]
+            }
+        },
+        "root": {
+            "type": "Subtree",
+            "subtree": "outer"
+        }
+    })";
+
+    auto root = TreeParser::Parse(json);
+    ASSERT_NE(root, nullptr);
+    EXPECT_EQ(root->type(), "Subtree");
+
+    auto* outer_sub = dynamic_cast<SubtreeNode*>(root.get());
+    ASSERT_NE(outer_sub, nullptr);
+    auto* outer_seq = dynamic_cast<Composite*>(outer_sub->subtree_root());
+    ASSERT_NE(outer_seq, nullptr);
+    EXPECT_EQ(outer_seq->children().size(), 2u);
+
+    // First child is an inner SubtreeNode
+    auto* inner_sub = dynamic_cast<SubtreeNode*>(outer_seq->children()[0].get());
+    ASSERT_NE(inner_sub, nullptr);
+    EXPECT_EQ(inner_sub->subtree_name(), "inner");
+}
+
+TEST(SubtreeTest, SubtreeWithDecorators) {
+    const char* json = R"({
+        "subtrees": {
+            "combat": {
+                "type": "Script",
+                "path": "fight.lua"
+            }
+        },
+        "root": {
+            "type": "Subtree",
+            "subtree": "combat",
+            "decorators": [
+                {"type": "BlackboardCondition", "key": "has_target", "operator": "is_set"}
+            ]
+        }
+    })";
+
+    auto root = TreeParser::Parse(json);
+    ASSERT_NE(root, nullptr);
+    EXPECT_EQ(root->decorators().size(), 1u);
+}
+
+TEST(SubtreeTest, SubtreeWithSensors) {
+    const char* json = R"({
+        "subtrees": {
+            "patrol": {
+                "type": "Script",
+                "path": "patrol.lua"
+            }
+        },
+        "root": {
+            "type": "Subtree",
+            "subtree": "patrol",
+            "sensors": [
+                {"name": "nearby", "path": "sensors/nearby.lua", "interval": 200}
+            ]
+        }
+    })";
+
+    auto root = TreeParser::Parse(json);
+    ASSERT_NE(root, nullptr);
+    EXPECT_EQ(root->sensor_specs().size(), 1u);
+    EXPECT_EQ(root->sensor_specs()[0].name, "nearby");
+}
+
+TEST(SubtreeTest, SubtreeUsedMultipleTimes) {
+    const char* json = R"({
+        "subtrees": {
+            "check": {
+                "type": "Script",
+                "path": "check.lua"
+            }
+        },
+        "root": {
+            "type": "Sequence",
+            "children": [
+                {"type": "Subtree", "subtree": "check", "name": "check_1"},
+                {"type": "Subtree", "subtree": "check", "name": "check_2"}
+            ]
+        }
+    })";
+
+    auto root = TreeParser::Parse(json);
+    ASSERT_NE(root, nullptr);
+    auto* seq = dynamic_cast<Composite*>(root.get());
+    ASSERT_NE(seq, nullptr);
+    EXPECT_EQ(seq->children().size(), 2u);
+
+    EXPECT_EQ(seq->children()[0]->name(), "check_1");
+    EXPECT_EQ(seq->children()[1]->name(), "check_2");
+    EXPECT_EQ(seq->children()[0]->type(), "Subtree");
+    EXPECT_EQ(seq->children()[1]->type(), "Subtree");
+}
+
+TEST(SubtreeTest, SubtreeInSelector) {
+    const char* json = R"({
+        "subtrees": {
+            "combat": {
+                "type": "Sequence",
+                "children": [
+                    {"type": "Script", "path": "aim.lua"},
+                    {"type": "Script", "path": "attack.lua"}
+                ]
+            }
+        },
+        "root": {
+            "type": "Selector",
+            "children": [
+                {"type": "Subtree", "subtree": "combat"},
+                {"type": "Script", "path": "idle.lua"}
+            ]
+        }
+    })";
+
+    auto root = TreeParser::Parse(json);
+    ASSERT_NE(root, nullptr);
+    auto* sel = dynamic_cast<Composite*>(root.get());
+    ASSERT_NE(sel, nullptr);
+    EXPECT_EQ(sel->children().size(), 2u);
+
+    auto* sub = dynamic_cast<SubtreeNode*>(sel->children()[0].get());
+    ASSERT_NE(sub, nullptr);
+    EXPECT_EQ(sub->subtree_name(), "combat");
+}
+
+TEST(SubtreeTest, SubtreeParentPointer) {
+    const char* json = R"({
+        "subtrees": {
+            "leaf": {
+                "type": "Script",
+                "path": "leaf.lua"
+            }
+        },
+        "root": {
+            "type": "Subtree",
+            "subtree": "leaf"
+        }
+    })";
+
+    auto root = TreeParser::Parse(json);
+    ASSERT_NE(root, nullptr);
+    auto* sub = dynamic_cast<SubtreeNode*>(root.get());
+    ASSERT_NE(sub, nullptr);
+
+    // Subtree root's parent should be the SubtreeNode
+    EXPECT_EQ(sub->subtree_root()->parent(), sub);
+}
+
+TEST(SubtreeTest, CircularSubtreeReference) {
+    const char* json = R"({
+        "subtrees": {
+            "a": {"type": "Subtree", "subtree": "a"}
+        },
+        "root": {"type": "Subtree", "subtree": "a"}
+    })";
+
+    auto root = TreeParser::Parse(json);
+    EXPECT_EQ(root, nullptr);
+}
+
+TEST(SubtreeTest, IndirectCircularReference) {
+    const char* json = R"({
+        "subtrees": {
+            "a": {"type": "Subtree", "subtree": "b"},
+            "b": {"type": "Subtree", "subtree": "a"}
+        },
+        "root": {"type": "Subtree", "subtree": "a"}
+    })";
+
+    auto root = TreeParser::Parse(json);
+    EXPECT_EQ(root, nullptr);
 }
