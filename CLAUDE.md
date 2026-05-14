@@ -15,7 +15,7 @@ docs/             # 文档
 ## 文档
 
 - [Lua API 参考](docs/lua_api.md) — 全局函数、http 模块、bt 模块、require/loadfile
-- [行为树节点 JSON 配置](docs/bt_node_config.md) — 节点类型、装饰器、完整示例
+- [行为树节点 JSON 配置](docs/bt_node_config.md) — 节点类型、装饰器、目录模式、完整示例
 
 ## 构建
 
