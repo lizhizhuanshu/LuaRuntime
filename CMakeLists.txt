@@ -75,14 +75,35 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(cinatra)
 
+# nlohmann/json (header-only)
+set(JSON_BuildTests OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(
+    json
+    GIT_REPOSITORY https://github.com/nlohmann/json.git
+    GIT_TAG        v3.11.3
+)
+FetchContent_MakeAvailable(json)
+
 # ── LuaRuntime library ─────────────────────────────────────────────────────
 
 add_library(lua_runtime_lib STATIC
     src/lua/lua_context.cc
     src/lua/lua_runtime.cc
     src/lua/http_library.cc
+    src/bt/node.cc
+    src/bt/composite.cc
+    src/bt/selector.cc
+    src/bt/sequence.cc
+    src/bt/parallel.cc
+    src/bt/blackboard_condition.cc
+    src/bt/inverter.cc
+    src/bt/force_success.cc
+    src/bt/script_node.cc
+    src/bt/behavior_tree_engine.cc
+    src/bt/tree_parser.cc
+    src/bt/bt_library.cc
 )
-target_include_directories(lua_runtime_lib PUBLIC src/lua)
+target_include_directories(lua_runtime_lib PUBLIC src/lua src/bt)
 cinatra_use_third_party_headers(lua_runtime_lib)
 target_include_directories(lua_runtime_lib SYSTEM PRIVATE ${cinatra_SOURCE_DIR}/include)
 target_compile_definitions(lua_runtime_lib PUBLIC CINATRA_ENABLE_SSL)
@@ -92,6 +113,7 @@ target_link_libraries(lua_runtime_lib PUBLIC
     spdlog::spdlog_header_only
     lua
     async_simple
+    nlohmann_json::nlohmann_json
 )
 target_link_libraries(lua_runtime_lib PRIVATE
     Threads::Threads

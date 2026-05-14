@@ -130,6 +130,12 @@ public:
     AsyncHandle PreYield(lua_State* co);
     static int Yield(lua_State* L);
 
+    // --- Coroutine completion callback (for ScriptNode yield/resume) ---
+
+    using CoCompleteCallback = std::function<void(ScriptResult)>;
+    void SetCoCompleteCallback(lua_State* co, CoCompleteCallback cb);
+    void RemoveCoCompleteCallback(lua_State* co);
+
     // --- Wait/signal for event loop ---
 
     std::mutex& mutex() { return mutex_; }
@@ -137,10 +143,18 @@ public:
     bool HasWork() const;
     std::optional<int64_t> NextTimerDeadline() const;
 
+    // Shared access to code provider (for BT thread to share the same provider)
+    std::shared_ptr<CodeProvider> shared_code_provider() const { return code_provider_; }
+
     // --- Value marshalling (stateless) ---
 
     static std::vector<LuaValue> PeekValues(lua_State* L, int nresults);
     static void PushValues(lua_State* L, const std::vector<LuaValue>& values);
+
+    // --- Coroutine pool (event loop thread only) ---
+
+    lua_State* AcquireCoroutine() { return AcquireCo(); }
+    void ReleaseCoroutine(lua_State* co) { ReleaseCo(co); }
 
 private:
     void SetupBuiltins(lua_State* main_L);
@@ -194,4 +208,7 @@ private:
     std::vector<std::pair<lua_State*, int>> co_pool_;
 
     std::unordered_map<lua_State*, async_simple::Promise<ScriptResult>> script_promises_;
+
+    // Coroutine completion callbacks (ScriptNode yield/resume tracking)
+    std::unordered_map<lua_State*, CoCompleteCallback> co_complete_callbacks_;
 };

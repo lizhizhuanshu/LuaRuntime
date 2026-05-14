@@ -683,6 +683,16 @@ void LuaContext::Shutdown() {
     }
 }
 
+// --- Coroutine completion callback ---
+
+void LuaContext::SetCoCompleteCallback(lua_State* co, CoCompleteCallback cb) {
+    co_complete_callbacks_[co] = std::move(cb);
+}
+
+void LuaContext::RemoveCoCompleteCallback(lua_State* co) {
+    co_complete_callbacks_.erase(co);
+}
+
 // --- Internal: coroutine pool ---
 
 lua_State* LuaContext::AcquireCo() {
@@ -719,18 +729,31 @@ void LuaContext::MaybeRecycleCo(lua_State* co, int status, int nresults) {
         lua_pop(co, 1);
     }
     if (status != LUA_YIELD) {
+        std::vector<LuaValue> values;
+        if (status == LUA_OK) {
+            values = PeekValues(co, nresults);
+        }
+
         auto it = script_promises_.find(co);
         if (it != script_promises_.end()) {
             ScriptResult result;
             result.status = status;
-            if (status == LUA_OK) {
-                result.values = PeekValues(co, nresults);
-            } else {
-                result.error = std::move(error_msg);
-            }
+            result.values = values;
+            result.error = error_msg;
             it->second.setValue(std::move(result));
             script_promises_.erase(it);
         }
+
+        auto cb_it = co_complete_callbacks_.find(co);
+        if (cb_it != co_complete_callbacks_.end()) {
+            ScriptResult result;
+            result.status = status;
+            result.values = std::move(values);
+            result.error = std::move(error_msg);
+            cb_it->second(std::move(result));
+            co_complete_callbacks_.erase(cb_it);
+        }
+
         ReleaseCo(co);
     }
 }
