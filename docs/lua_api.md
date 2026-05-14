@@ -319,7 +319,7 @@ local bt = require('bt')
 
 | 函数 | 说明 |
 |------|------|
-| `bt.run(json)` | 运行行为树（协程），返回 `"success"` / `"failure"` / `"stopped"` |
+| `bt.run(json_or_path)` | 运行行为树（协程），接受 JSON 字符串或目录路径，返回 `"success"` / `"failure"` / `"stopped"` |
 | `bt.stop()` | 停止行为树 |
 | `bt.pause()` | 暂停行为树 |
 | `bt.resume()` | 恢复行为树 |
@@ -329,3 +329,32 @@ local bt = require('bt')
 | `bt.notify(event, data)` | 发送事件到事件队列 |
 | `bt.get_status()` | 获取状态 (`"running"` / `"paused"` / `"stopped"`) |
 | `bt.get_current_node()` | 获取当前执行的节点名称 |
+
+### bt.run(json_or_path)
+
+协程异步——调用时 yield 挂起，行为树执行完成后自动恢复。
+
+**两种调用方式：**
+
+```lua
+-- 方式1: JSON 字符串（以 { 或 [ 开头）
+local status = bt.run('{"root": {"type": "Selector", "children": [...]}}')
+
+-- 方式2: 目录路径
+local status = bt.run("path/to/tree_dir")
+```
+
+**目录模式：** 指定一个包含行为树定义文件的目录：
+
+```
+tree_dir/
+├── root.json       # 根树定义（必需）
+├── combat.json     # 子树 "combat"（可选）
+└── patrol.json     # 子树 "patrol"（可选）
+```
+
+- `root.json`：根节点定义
+- 其他 `.json` 文件：文件名（去掉扩展名）作为子树名称，可在 root 中通过 `{"type": "Subtree", "subtree": "combat"}` 引用
+- 非 `.json` 文件会被忽略
+
+**返回值：** `string` — `"success"` / `"failure"` / `"stopped"`

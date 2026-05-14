@@ -4,6 +4,10 @@
 
 JSON 必须包含 `"root"` 字段，所有节点必须包含 `"type"` 字段。可选的 `"subtrees"` 字段定义可复用的子树。
 
+### 内联 JSON 模式
+
+通过 `bt.run(json_string)` 直接传入完整 JSON：
+
 ```json
 {
   "subtrees": {
@@ -16,6 +20,25 @@ JSON 必须包含 `"root"` 字段，所有节点必须包含 `"type"` 字段。�
     "decorators": [...]
   }
 }
+```
+
+### 目录模式
+
+通过 `bt.run(directory_path)` 从目录加载树定义：
+
+```
+tree_dir/
+├── root.json       # 根树定义（必需）
+├── combat.json     # 子树 "combat"
+└── patrol.json     # 子树 "patrol"
+```
+
+- `root.json`：根节点定义（与内联模式的 `"root"` 字段内容格式相同）
+- 其他 `.json` 文件：文件名（去掉扩展名）作为子树名称，等价于内联模式 `"subtrees"` 中的一个条目
+
+```lua
+local bt = require('bt')
+local status = bt.run("trees/ai_main")
 ```
 
 ---
@@ -334,6 +357,8 @@ end
 
 ## 5. 完整示例
 
+### 内联 JSON 示例
+
 ```json
 {
   "root": {
@@ -380,6 +405,68 @@ end
       }
     ]
   }
+}
+```
+
+### 目录模式示例
+
+将上面的 JSON 拆分为目录文件，效果等价：
+
+```lua
+local status = bt.run("trees/ai_main")
+```
+
+```
+trees/ai_main/
+├── root.json
+├── combat.json
+└── patrol.json
+```
+
+**root.json:**
+```json
+{
+  "type": "Selector",
+  "name": "ai_root",
+  "decorators": [
+    {"type": "BlackboardCondition", "key": "alive", "operator": "is_set", "abort": "Self"}
+  ],
+  "children": [
+    {"type": "Subtree", "subtree": "combat"},
+    {"type": "Subtree", "subtree": "patrol"},
+    {
+      "type": "Script",
+      "path": "scripts/idle.lua",
+      "decorators": [{"type": "ForceSuccess"}]
+    }
+  ]
+}
+```
+
+**combat.json:**
+```json
+{
+  "type": "Sequence",
+  "name": "combat",
+  "decorators": [
+    {"type": "BlackboardCondition", "key": "has_target", "operator": "is_set"}
+  ],
+  "children": [
+    {"type": "Script", "path": "scripts/aim.lua", "name": "aim"},
+    {"type": "Script", "path": "scripts/attack.lua", "name": "attack"}
+  ]
+}
+```
+
+**patrol.json:**
+```json
+{
+  "type": "Sequence",
+  "name": "patrol",
+  "children": [
+    {"type": "Script", "path": "scripts/find_point.lua"},
+    {"type": "Script", "path": "scripts/move_to.lua"}
+  ]
 }
 ```
 
