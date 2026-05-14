@@ -20,6 +20,7 @@ extern "C" {
 
 #include "code_provider.h"
 #include "lua_extension.h"
+#include "lua_library.h"
 
 
 namespace async_simple {
@@ -91,10 +92,12 @@ public:
     void SetExecutor(async_simple::Executor* executor) { executor_ = executor; }
     void SetCModules(std::unordered_map<std::string, lua_CFunction> modules) { c_modules_ = std::move(modules); }
     void SetExtensions(std::vector<std::shared_ptr<LuaExtension>> extensions) { extensions_ = std::move(extensions); }
+    void SetLibraries(std::unordered_map<std::string, std::shared_ptr<LuaLibrary>> libraries) { libraries_ = std::move(libraries); }
 
     CodeProvider* code_provider() const { return code_provider_.get(); }
     async_simple::Executor* executor() const { return executor_; }
     std::optional<lua_CFunction> find_c_module(const std::string& name) const;
+    std::shared_ptr<LuaLibrary> find_library(const std::string& name) const;
     lua_State* main_state() const { return main_L_; }
 
     // --- Setup (called on main thread during initialization) ---
@@ -107,6 +110,7 @@ public:
     void PushTask(TaskRequest task);
     void PushResume(AsyncHandle handle, std::vector<LuaValue> args = {});
     void PushRelease(std::vector<int> refs);
+    void CallLuaFunction(int fn_ref, std::vector<LuaValue> args);
 
     // --- Event loop processing (event loop thread only) ---
 
@@ -174,6 +178,7 @@ private:
     std::vector<std::shared_ptr<LuaExtension>> extensions_;
     async_simple::Executor* executor_ = nullptr;
     std::unordered_map<std::string, lua_CFunction> c_modules_;
+    std::unordered_map<std::string, std::shared_ptr<LuaLibrary>> libraries_;
 
     std::mutex mutex_;
     std::condition_variable cv_;

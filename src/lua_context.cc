@@ -154,6 +154,18 @@ int custom_require(lua_State* L) {
         return 1;
     }
 
+    // 2.5. Check LuaLibrary (synchronous, Open pushes a table)
+    auto lib = ctx->find_library(name);
+    if (lib) {
+        int top = lua_gettop(L);
+        lib->Open(L);
+        if (lua_gettop(L) != top + 1) {
+            return luaL_error(L, "library '%s' Open() must push exactly 1 value", name);
+        }
+        CacheModuleResult(L, name, -1);
+        return 1;
+    }
+
     // 3. CodeProvider (async via async_simple + yieldk)
     if (ctx->code_provider()) {
         if (!ctx->executor()) {
@@ -272,6 +284,11 @@ std::optional<lua_CFunction> LuaContext::find_c_module(const std::string& name) 
     return it != c_modules_.end() ? std::optional(it->second) : std::nullopt;
 }
 
+std::shared_ptr<LuaLibrary> LuaContext::find_library(const std::string& name) const {
+    auto it = libraries_.find(name);
+    return it != libraries_.end() ? it->second : nullptr;
+}
+
 // --- Setup ---
 
 void LuaContext::Setup(lua_State* main_L) {
@@ -309,7 +326,7 @@ void LuaContext::SetupBuiltins(lua_State* main_L) {
 }
 
 void LuaContext::SetupCustomRequire(lua_State* main_L) {
-    if (!code_provider_ && c_modules_.empty()) return;
+    if (!code_provider_ && c_modules_.empty() && libraries_.empty()) return;
 
     // Clear package.searchers (our custom require handles everything)
     lua_getglobal(main_L, "package");
@@ -371,6 +388,11 @@ void LuaContext::PushRelease(std::vector<int> refs) {
     if (queued) {
         cv_.notify_one();
     }
+}
+
+void LuaContext::CallLuaFunction(int fn_ref, std::vector<LuaValue> args) {
+    async_simple::Promise<ScriptResult> promise;
+    PushTask({CallRef{fn_ref, std::move(args), false}, std::move(promise)});
 }
 
 // --- Event loop processing ---
@@ -613,6 +635,9 @@ void LuaContext::Shutdown() {
 
     for (auto& ext : extensions_) {
         ext->OnShutdown(main_L_);
+    }
+    for (auto& [name, lib] : libraries_) {
+        lib->Close(main_L_);
     }
     while (true) {
         std::optional<WorkItem> item;

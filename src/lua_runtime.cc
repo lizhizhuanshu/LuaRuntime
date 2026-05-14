@@ -21,6 +21,7 @@ LuaRuntime::LuaRuntime() : lua_(std::make_unique<sol::state>()) {
 
 void LuaRuntime::Setup(sol::state& lua, const std::shared_ptr<CodeProvider>& code_provider,
                        const std::unordered_map<std::string, lua_CFunction>& c_modules,
+                       const std::unordered_map<std::string, std::shared_ptr<LuaLibrary>>& libraries,
                        async_simple::Executor* executor,
                        const std::vector<std::shared_ptr<LuaExtension>>& extensions) {
     auto ctx = LuaContext::FromLuaState(lua.lua_state());
@@ -28,6 +29,7 @@ void LuaRuntime::Setup(sol::state& lua, const std::shared_ptr<CodeProvider>& cod
     ctx->SetCodeProvider(code_provider);
     ctx->SetExecutor(executor);
     ctx->SetCModules(c_modules);
+    ctx->SetLibraries(libraries);
     ctx->SetExtensions(extensions);
 
     ctx->Setup(lua.lua_state());
@@ -118,9 +120,14 @@ LuaRuntime::Builder& LuaRuntime::Builder::RegisterExtension(std::shared_ptr<LuaE
     return *this;
 }
 
+LuaRuntime::Builder& LuaRuntime::Builder::RegisterLibrary(std::shared_ptr<LuaLibrary> library) {
+    libraries_[library->name()] = std::move(library);
+    return *this;
+}
+
 LuaRuntime::Ptr LuaRuntime::Builder::Create() {
     auto rt = std::shared_ptr<LuaRuntime>(new LuaRuntime());
-    LuaRuntime::Setup(rt->lua(), code_provider_, c_modules_, executor_, extensions_);
+    LuaRuntime::Setup(rt->lua(), code_provider_, c_modules_, libraries_, executor_, extensions_);
     rt->Start();
     return rt;
 }

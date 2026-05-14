@@ -55,18 +55,49 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(spdlog)
 
+# OpenSSL (from source)
+FetchContent_Declare(
+    openssl
+    GIT_REPOSITORY https://github.com/openssl/openssl.git
+    GIT_TAG        openssl-3.4.0
+)
+FetchContent_MakeAvailable(openssl)
+
+# cinatra (HTTP client, header-only) -- also brings asio
+set(ENABLE_SSL ON CACHE BOOL "" FORCE)
+set(BUILD_UNIT_TESTS OFF CACHE BOOL "" FORCE)
+set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(BUILD_PRESS_TOOL OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(
+    cinatra
+    GIT_REPOSITORY https://github.com/lizhizhuanshu/cinatra.git
+    GIT_TAG        master
+)
+FetchContent_MakeAvailable(cinatra)
+
 # ── LuaRuntime library ─────────────────────────────────────────────────────
 
 add_library(lua_runtime_lib STATIC
     src/lua_context.cc
     src/lua_runtime.cc
+    src/http_library.cc
 )
 target_include_directories(lua_runtime_lib PUBLIC src)
+cinatra_use_third_party_headers(lua_runtime_lib)
+target_include_directories(lua_runtime_lib SYSTEM PRIVATE ${cinatra_SOURCE_DIR}/include)
+target_compile_definitions(lua_runtime_lib PUBLIC CINATRA_ENABLE_SSL)
+find_package(Threads REQUIRED)
 target_link_libraries(lua_runtime_lib PUBLIC
     sol2::sol2
     spdlog::spdlog_header_only
     lua
     async_simple
+)
+target_link_libraries(lua_runtime_lib PRIVATE
+    Threads::Threads
+    ssl
+    crypto
+    dl
 )
 
 # ── Tests ──────────────────────────────────────────────────────────────────
@@ -82,5 +113,6 @@ FetchContent_MakeAvailable(googletest)
 file(GLOB TEST_SOURCES tests/*.cc)
 add_executable(lua_runtime_test ${TEST_SOURCES})
 target_link_libraries(lua_runtime_test PRIVATE lua_runtime_lib GTest::gtest_main)
+target_include_directories(lua_runtime_test SYSTEM PRIVATE ${cinatra_SOURCE_DIR}/include)
 include(GoogleTest)
 gtest_discover_tests(lua_runtime_test)

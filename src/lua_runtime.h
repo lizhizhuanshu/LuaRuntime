@@ -14,6 +14,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "lua_library.h"
+
 class LuaRuntime : public std::enable_shared_from_this<LuaRuntime> {
 public:
     using Ptr = std::shared_ptr<LuaRuntime>;
@@ -32,6 +34,7 @@ public:
         Builder& WithExecutor(async_simple::Executor& executor);
         Builder& Register(const std::string& name, lua_CFunction openf);
         Builder& RegisterExtension(std::shared_ptr<LuaExtension> extension);
+        Builder& RegisterLibrary(std::shared_ptr<LuaLibrary> library);
         Ptr Create();
 
     private:
@@ -39,6 +42,7 @@ public:
         async_simple::Executor* executor_ = nullptr;
         std::unordered_map<std::string, lua_CFunction> c_modules_;
         std::vector<std::shared_ptr<LuaExtension>> extensions_;
+        std::unordered_map<std::string, std::shared_ptr<LuaLibrary>> libraries_;
     };
 
 private:
@@ -46,6 +50,7 @@ private:
 
     static void Setup(sol::state& lua, const std::shared_ptr<CodeProvider>& code_provider,
                       const std::unordered_map<std::string, lua_CFunction>& c_modules,
+                      const std::unordered_map<std::string, std::shared_ptr<LuaLibrary>>& libraries,
                       async_simple::Executor* executor,
                       const std::vector<std::shared_ptr<LuaExtension>>& extensions);
 

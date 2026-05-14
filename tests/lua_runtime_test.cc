@@ -1,6 +1,8 @@
 #include "lua_runtime.h"
 #include "lua_context.h"
 #include "lua_extension.h"
+#include "lua_library.h"
+#include "http_library.h"
 
 #include <gtest/gtest.h>
 
@@ -853,4 +855,242 @@ TEST_F(LuaRuntimeBuilderTest, ExtensionSharedAcrossRuntimes) {
 
     EXPECT_EQ(AWAIT(rt1->RunScript("assert(magic_number == 42)")).status, LUA_OK);
     EXPECT_EQ(AWAIT(rt2->RunScript("assert(magic_number == 42)")).status, LUA_OK);
+}
+
+// --- LuaLibrary ---
+
+class TestLibrary : public LuaLibrary {
+public:
+    std::string name() const override { return "testlib"; }
+
+    void Open(lua_State* L) override {
+        lua_newtable(L);
+        lua_pushcfunction(L, [](lua_State* L) -> int {
+            int a = static_cast<int>(luaL_checkinteger(L, 1));
+            int b = static_cast<int>(luaL_checkinteger(L, 2));
+            lua_pushinteger(L, a + b);
+            return 1;
+        });
+        lua_setfield(L, -2, "add");
+        lua_pushinteger(L, 99);
+        lua_setfield(L, -2, "magic");
+        open_count++;
+    }
+
+    void Close(lua_State* L) override { close_count++; }
+
+    int open_count = 0;
+    int close_count = 0;
+};
+
+class LuaLibraryTest : public ::testing::Test {
+protected:
+    void SetUp() override {
+        lib = std::make_shared<TestLibrary>();
+        rt = LuaRuntime::Builder()
+            .RegisterLibrary(lib)
+            .Create();
+    }
+
+    async_simple::executors::SimpleExecutor executor{1};
+    std::shared_ptr<TestLibrary> lib;
+    LuaRuntime::Ptr rt;
+};
+
+TEST_F(LuaLibraryTest, RequireReturnsTable) {
+    EXPECT_EQ(AWAIT(rt->RunScript(R"(
+        local m = require("testlib")
+        assert(type(m) == "table")
+        assert(m.add(1, 2) == 3)
+        assert(m.magic == 99)
+    )")).status, LUA_OK);
+}
+
+TEST_F(LuaLibraryTest, RequireCachesResult) {
+    EXPECT_EQ(AWAIT(rt->RunScript(R"(
+        local a = require("testlib")
+        local b = require("testlib")
+        assert(a == b, "expected same table on second require")
+    )")).status, LUA_OK);
+}
+
+TEST_F(LuaLibraryTest, OpenCalledOnEachRequire) {
+    // Open is called each time require is invoked (not cached by the library itself)
+    EXPECT_EQ(lib->open_count, 0);
+    AWAIT(rt->RunScript(R"(
+        local a = require("testlib")
+        local b = require("testlib")  -- cached, Open not called again
+    )"));
+    EXPECT_EQ(lib->open_count, 1);
+}
+
+TEST_F(LuaLibraryTest, CloseCalledOnShutdown) {
+    EXPECT_EQ(lib->close_count, 0);
+    rt.reset();
+    EXPECT_EQ(lib->close_count, 1);
+}
+
+TEST_F(LuaLibraryTest, LibraryNotFound) {
+    auto r = AWAIT(rt->RunScript(R"(require("nonexistent_lib"))"));
+    EXPECT_NE(r.status, LUA_OK);
+    EXPECT_FALSE(r.error.empty());
+}
+
+TEST_F(LuaLibraryTest, LibraryWithCodeProviderPrecedence) {
+    auto provider = std::make_unique<TestCodeProvider>();
+    provider->set_module("testlib", "return { from_provider = true }");
+
+    auto rt2 = LuaRuntime::Builder()
+        .WithExecutor(executor)
+        .RegisterLibrary(lib)
+        .WithCodeProvider(std::move(provider))
+        .Create();
+
+    // Library takes precedence over CodeProvider
+    EXPECT_EQ(AWAIT(rt2->RunScript(R"(
+        local m = require("testlib")
+        assert(m.magic == 99, "expected library, got provider module")
+    )")).status, LUA_OK);
+}
+
+TEST_F(LuaLibraryTest, CModuleTakesPrecedenceOverLibrary) {
+    rt = LuaRuntime::Builder()
+        .Register("testlib", [](lua_State* L) -> int {
+            lua_newtable(L);
+            lua_pushstring(L, "from_cmodule");
+            lua_setfield(L, -2, "source");
+            return 1;
+        })
+        .RegisterLibrary(lib)
+        .Create();
+
+    EXPECT_EQ(AWAIT(rt->RunScript(R"(
+        local m = require("testlib")
+        assert(m.source == "from_cmodule", "expected C module to take precedence")
+    )")).status, LUA_OK);
+}
+
+TEST_F(LuaLibraryTest, MultipleLibraries) {
+    struct MathLib : public LuaLibrary {
+        std::string name() const override { return "mymath"; }
+        void Open(lua_State* L) override {
+            lua_newtable(L);
+            lua_pushcfunction(L, [](lua_State* L) -> int {
+                int a = static_cast<int>(luaL_checkinteger(L, 1));
+                int b = static_cast<int>(luaL_checkinteger(L, 2));
+                lua_pushinteger(L, a * b);
+                return 1;
+            });
+            lua_setfield(L, -2, "mul");
+        }
+    };
+
+    auto rt2 = LuaRuntime::Builder()
+        .RegisterLibrary(std::make_shared<MathLib>())
+        .RegisterLibrary(lib)
+        .Create();
+
+    EXPECT_EQ(AWAIT(rt2->RunScript(R"(
+        local m = require("mymath")
+        local t = require("testlib")
+        assert(m.mul(3, 4) == 12)
+        assert(t.add(1, 2) == 3)
+    )")).status, LUA_OK);
+}
+
+// --- HttpLibrary ---
+
+class HttpLibraryTest : public ::testing::Test {
+protected:
+    void SetUp() override {
+        rt = LuaRuntime::Builder()
+            .RegisterLibrary(std::make_shared<HttpLibrary>())
+            .Create();
+    }
+
+    LuaRuntime::Ptr rt;
+};
+
+TEST_F(HttpLibraryTest, RequireReturnsTable) {
+    EXPECT_EQ(AWAIT(rt->RunScript(R"(
+        local http = require("http")
+        assert(type(http) == "table")
+    )")).status, LUA_OK);
+}
+
+TEST_F(HttpLibraryTest, HasHttpFunctions) {
+    EXPECT_EQ(AWAIT(rt->RunScript(R"(
+        local http = require("http")
+        assert(type(http.get) == "function", "expected http.get")
+        assert(type(http.post) == "function", "expected http.post")
+        assert(type(http.put) == "function", "expected http.put")
+        assert(type(http.del) == "function", "expected http.del")
+        assert(type(http.ws_create) == "function", "expected http.ws_create")
+    )")).status, LUA_OK);
+}
+
+TEST_F(HttpLibraryTest, WsCreateReturnsUserdata) {
+    EXPECT_EQ(AWAIT(rt->RunScript(R"(
+        local http = require("http")
+        local ws = http.ws_create("wss://echo.websocket.org")
+        assert(type(ws) == "userdata", "expected userdata for ws")
+    )")).status, LUA_OK);
+}
+
+TEST_F(HttpLibraryTest, WsSupportsCallbackAssignment) {
+    EXPECT_EQ(AWAIT(rt->RunScript(R"(
+        local http = require("http")
+        local ws = http.ws_create("wss://echo.websocket.org")
+        local received = nil
+        ws.onmessage = function(data) received = data end
+        ws.onerror = function(err) end
+        ws.onclose = function() end
+    )")).status, LUA_OK);
+}
+
+TEST_F(HttpLibraryTest, WsCallbackReadback) {
+    EXPECT_EQ(AWAIT(rt->RunScript(R"(
+        local http = require("http")
+        local ws = http.ws_create("wss://echo.websocket.org")
+        local fn = function(data) end
+        ws.onmessage = fn
+        assert(ws.onmessage == fn, "expected same function back")
+    )")).status, LUA_OK);
+}
+
+TEST_F(HttpLibraryTest, WsInvalidPropertyErrors) {
+    auto r = AWAIT(rt->RunScript(R"(
+        local http = require("http")
+        local ws = http.ws_create("wss://echo.websocket.org")
+        ws.invalid_prop = 42
+    )"));
+    EXPECT_NE(r.status, LUA_OK);
+}
+
+TEST_F(HttpLibraryTest, HttpGetReturnsErrorForInvalidUrl) {
+    auto r = AWAIT(rt->RunScript(R"(
+        local http = require("http")
+        local status, body, err = http.get("http://127.0.0.1:1")
+        -- connection refused: status may be 0 or a non-200 code, err should be non-nil
+        assert(err ~= nil, "expected error message for connection refused, got nil")
+    )"));
+    EXPECT_EQ(r.status, LUA_OK);
+}
+
+TEST_F(HttpLibraryTest, RequireCached) {
+    EXPECT_EQ(AWAIT(rt->RunScript(R"(
+        local a = require("http")
+        local b = require("http")
+        assert(a == b, "expected same table on second require")
+    )")).status, LUA_OK);
+}
+
+TEST_F(HttpLibraryTest, WsConnectToInvalidEndpoint) {
+    auto r = AWAIT(rt->RunScript(R"(
+        local http = require("http")
+        local ws = http.ws_create("ws://127.0.0.1:1")
+        local ok, err = ws:connect()
+        assert(ok == false, "expected connect to fail")
+    )"));
+    EXPECT_EQ(r.status, LUA_OK);
 }
